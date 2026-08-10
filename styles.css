@@ -204,3 +204,29 @@ h1 span{color:var(--green)}
   .legal-page h1{font-size:2.4rem;margin-bottom:36px}
   .legal-page p,.legal-page li{font-size:1rem;line-height:1.75}
 }
+
+.scan-status{
+  position:absolute;
+  left:8px;
+  right:8px;
+  top:8px;
+  z-index:3;
+  width:max-content;
+  max-width:calc(100% - 50px);
+  overflow:hidden;
+  padding:6px 8px;
+  border-radius:999px;
+  color:#fff;
+  background:rgba(17,23,20,.76);
+  box-shadow:0 5px 16px rgba(17,23,20,.12);
+  font-size:9px;
+  font-weight:800;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  backdrop-filter:blur(8px);
+}
+.scan-status.enhanced{background:rgba(47,111,87,.92)}
+.scan-status.checking{background:rgba(17,23,20,.70)}
+.enhance-button{
+  border-color:rgba(47,111,87,.20);
+}

@@ -147,12 +147,21 @@
         rotation: 0,
         source,
         documentMode: source === "camera" ? "auto" : "off",
-        documentDetected: null
+        documentDetected: null,
+        enhancedPreview: null,
+        analysingDocument: source === "camera" && fileKind !== "pdf"
       };
       items.push(item);
 
       if (fileKind === "pdf") {
         item.pageCount = await getPdfPageCount(file);
+      } else if (source === "camera") {
+        // Analyse camera captures immediately so the user can actually see
+        // the scanner behaviour before creating the PDF.
+        prepareDocumentPreview(item).finally(() => {
+          item.analysingDocument = false;
+          render();
+        });
       }
     }
 
@@ -190,9 +199,34 @@
         preview.appendChild(pdf);
       } else {
         img = document.createElement("img");
-        img.src = item.previewUrl;
+        const enhancementActive =
+          item.documentMode === "on" ||
+          (item.documentMode === "auto" && item.documentDetected === true);
+        img.src = enhancementActive && item.enhancedPreview
+          ? item.enhancedPreview
+          : item.previewUrl;
         img.alt = "";
         preview.appendChild(img);
+
+        if (item.source === "camera") {
+          const scanStatus = document.createElement("span");
+          scanStatus.className = "scan-status";
+
+          if (item.analysingDocument) {
+            scanStatus.textContent = "Checking document…";
+            scanStatus.classList.add("checking");
+          } else if (item.documentDetected === true && enhancementActive) {
+            scanStatus.textContent = "Document detected · Enhanced";
+            scanStatus.classList.add("enhanced");
+          } else if (item.documentDetected === false) {
+            scanStatus.textContent = "Photo kept original";
+          } else if (item.documentMode === "on") {
+            scanStatus.textContent = "Enhanced";
+            scanStatus.classList.add("enhanced");
+          }
+
+          if (scanStatus.textContent) preview.appendChild(scanStatus);
+        }
       }
 
       if (item.pageCount) {
@@ -257,20 +291,47 @@
         rotateButton.type = "button";
         rotateButton.textContent = "↻ Rotate";
         rotateButton.setAttribute("aria-label", `Rotate ${item.file.name} clockwise`);
-        rotateButton.addEventListener("click", () => {
+        rotateButton.addEventListener("click", async () => {
           item.rotation = (item.rotation + 90) % 360;
+          item.enhancedPreview = null;
           render();
+
+          if (item.documentMode === "on" ||
+              (item.documentMode === "auto" && item.documentDetected === true)) {
+            item.analysingDocument = true;
+            render();
+            await prepareDocumentPreview(item, true);
+            item.analysingDocument = false;
+            render();
+          }
         });
         reorder.appendChild(rotateButton);
 
         const enhanceButton = document.createElement("button");
         enhanceButton.className = "rotate-button enhance-button";
         enhanceButton.type = "button";
-        const enhancementOn = item.documentMode === "on" || (item.documentMode === "auto" && item.documentDetected === true);
-        enhanceButton.textContent = enhancementOn ? "✓ Scan clean" : "Scan clean";
-        enhanceButton.setAttribute("aria-label", `Toggle scanned-document cleanup for ${item.file.name}`);
-        enhanceButton.addEventListener("click", () => {
-          item.documentMode = enhancementOn ? "off" : "on";
+        const enhancementOn =
+          item.documentMode === "on" ||
+          (item.documentMode === "auto" && item.documentDetected === true);
+        enhanceButton.textContent = enhancementOn ? "Original" : "Scan clean";
+        enhanceButton.setAttribute(
+          "aria-label",
+          enhancementOn
+            ? `Show original ${item.file.name}`
+            : `Apply scanned-document cleanup to ${item.file.name}`
+        );
+        enhanceButton.addEventListener("click", async () => {
+          if (enhancementOn) {
+            item.documentMode = "off";
+            render();
+            return;
+          }
+
+          item.documentMode = "on";
+          item.analysingDocument = true;
+          render();
+          await prepareDocumentPreview(item, true);
+          item.analysingDocument = false;
           render();
         });
         reorder.appendChild(enhanceButton);
@@ -393,6 +454,56 @@
     rctx.rotate(rotation * Math.PI / 180);
     rctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
     return rotated;
+  }
+
+  function makePreviewDataUrl(canvas) {
+    // Keep preview memory modest while remaining sharp enough to compare
+    // Original vs Enhanced on a phone.
+    const max = 1200;
+    const scale = Math.min(1, max / Math.max(canvas.width, canvas.height));
+
+    if (scale === 1) {
+      return canvas.toDataURL("image/jpeg", 0.88);
+    }
+
+    const preview = document.createElement("canvas");
+    preview.width = Math.max(1, Math.round(canvas.width * scale));
+    preview.height = Math.max(1, Math.round(canvas.height * scale));
+
+    const ctx = preview.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, preview.width, preview.height);
+    ctx.drawImage(canvas, 0, 0, preview.width, preview.height);
+
+    return preview.toDataURL("image/jpeg", 0.88);
+  }
+
+  async function prepareDocumentPreview(item, forceEnhance = false) {
+    if (!item || item.kind === "pdf") return;
+
+    try {
+      const canvas = await decodeToCanvas(item.file, item.rotation);
+
+      if (item.documentDetected === null || item.source === "camera") {
+        item.documentDetected = analyseDocument(canvas);
+      }
+
+      const shouldEnhance =
+        forceEnhance ||
+        item.documentMode === "on" ||
+        (item.documentMode === "auto" && item.documentDetected === true);
+
+      if (shouldEnhance) {
+        enhanceDocument(canvas);
+        item.enhancedPreview = makePreviewDataUrl(canvas);
+      } else {
+        item.enhancedPreview = null;
+      }
+    } catch (error) {
+      console.warn("Document preview analysis failed:", error);
+      item.documentDetected = false;
+      item.enhancedPreview = null;
+    }
   }
 
   function analyseDocument(canvas) {

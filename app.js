@@ -105,7 +105,7 @@
     return items.reduce((sum, item) => sum + item.file.size, 0);
   }
 
-  async function addFiles(list) {
+  async function addFiles(list, source = "files") {
     clearError();
     resetResult();
 
@@ -143,7 +143,11 @@
         file,
         kind: fileKind,
         previewUrl: fileKind === "pdf" ? null : URL.createObjectURL(file),
-        pageCount: fileKind === "pdf" ? null : 1
+        pageCount: fileKind === "pdf" ? null : 1,
+        rotation: 0,
+        source,
+        documentMode: source === "camera" ? "auto" : "off",
+        documentDetected: null
       };
       items.push(item);
 
@@ -177,13 +181,15 @@
       const preview = document.createElement("div");
       preview.className = "file-preview";
 
+      let img = null;
+
       if (item.kind === "pdf") {
         const pdf = document.createElement("div");
         pdf.className = "pdf-preview";
         pdf.textContent = "PDF";
         preview.appendChild(pdf);
       } else {
-        const img = document.createElement("img");
+        img = document.createElement("img");
         img.src = item.previewUrl;
         img.alt = "";
         preview.appendChild(img);
@@ -244,6 +250,39 @@
       rightButton.addEventListener("click", () => moveItem(index, 1));
 
       reorder.append(leftButton, rightButton);
+
+      if (item.kind !== "pdf") {
+        const rotateButton = document.createElement("button");
+        rotateButton.className = "rotate-button";
+        rotateButton.type = "button";
+        rotateButton.textContent = "↻ Rotate";
+        rotateButton.setAttribute("aria-label", `Rotate ${item.file.name} clockwise`);
+        rotateButton.addEventListener("click", () => {
+          item.rotation = (item.rotation + 90) % 360;
+          render();
+        });
+        reorder.appendChild(rotateButton);
+
+        const enhanceButton = document.createElement("button");
+        enhanceButton.className = "rotate-button enhance-button";
+        enhanceButton.type = "button";
+        const enhancementOn = item.documentMode === "on" || (item.documentMode === "auto" && item.documentDetected === true);
+        enhanceButton.textContent = enhancementOn ? "✓ Scan clean" : "Scan clean";
+        enhanceButton.setAttribute("aria-label", `Toggle scanned-document cleanup for ${item.file.name}`);
+        enhanceButton.addEventListener("click", () => {
+          item.documentMode = enhancementOn ? "off" : "on";
+          render();
+        });
+        reorder.appendChild(enhanceButton);
+        if (img) {
+          img.style.transform = `rotate(${item.rotation}deg)`;
+          if (item.rotation === 90 || item.rotation === 270) {
+            img.style.width = "75%";
+            img.style.height = "133%";
+          }
+        }
+      }
+
       card.append(preview, remove, meta, reorder);
 
       card.addEventListener("dragstart", () => {
@@ -287,11 +326,18 @@
       ? `${items.length} source file${items.length === 1 ? "" : "s"} · ${pages || "?"} final page${pages === 1 ? "" : "s"} · ${formatBytes(getTotalBytes())}`
       : "";
 
+    const knownPages = items.every(item => Number.isInteger(item.pageCount));
+    if (items.length && knownPages) {
+      createButton.textContent = `Create ${pages}-page PDF`;
+    } else {
+      createButton.textContent = "Create PDF";
+    }
+
     workspace.classList.toggle("hidden", items.length === 0);
     dropZone.classList.toggle("hidden", items.length > 0);
   }
 
-  async function decodeToCanvas(file) {
+  async function decodeToCanvas(file, rotation = 0) {
     let source;
 
     try {
@@ -328,6 +374,91 @@
     ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
 
     if (source.close) source.close();
+
+    rotation = ((rotation || 0) % 360 + 360) % 360;
+    if (!rotation) return canvas;
+
+    const rotated = document.createElement("canvas");
+    if (rotation === 90 || rotation === 270) {
+      rotated.width = canvas.height;
+      rotated.height = canvas.width;
+    } else {
+      rotated.width = canvas.width;
+      rotated.height = canvas.height;
+    }
+    const rctx = rotated.getContext("2d");
+    rctx.fillStyle = "#ffffff";
+    rctx.fillRect(0, 0, rotated.width, rotated.height);
+    rctx.translate(rotated.width / 2, rotated.height / 2);
+    rctx.rotate(rotation * Math.PI / 180);
+    rctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+    return rotated;
+  }
+
+  function analyseDocument(canvas) {
+    // Conservative, low-cost document recognition. We sample the image rather
+    // than scanning every pixel so large phone photos stay responsive.
+    const sample = document.createElement("canvas");
+    const max = 320;
+    const scale = Math.min(1, max / Math.max(canvas.width, canvas.height));
+    sample.width = Math.max(1, Math.round(canvas.width * scale));
+    sample.height = Math.max(1, Math.round(canvas.height * scale));
+    const ctx = sample.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(canvas, 0, 0, sample.width, sample.height);
+    const data = ctx.getImageData(0, 0, sample.width, sample.height).data;
+
+    let light = 0, neutral = 0, dark = 0, total = 0;
+    for (let i = 0; i < data.length; i += 16) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const spread = Math.max(r, g, b) - Math.min(r, g, b);
+      if (lum > 165) light++;
+      if (spread < 38) neutral++;
+      if (lum < 105) dark++;
+      total++;
+    }
+    const lightRatio = light / total;
+    const neutralRatio = neutral / total;
+    const darkRatio = dark / total;
+
+    // Paper pages usually contain a substantial pale/neutral field plus some
+    // darker ink. This deliberately rejects colourful ordinary photographs.
+    return lightRatio > 0.42 && neutralRatio > 0.50 && darkRatio > 0.025;
+  }
+
+  function enhanceDocument(canvas) {
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = image.data;
+
+    // Gentle scanner-style cleanup: neutralise near-paper pixels, lift uneven
+    // paper/shadows, deepen ink and slightly reduce colour cast. It preserves
+    // coloured logos/signatures rather than forcing black and white.
+    for (let i = 0; i < d.length; i += 4) {
+      let r = d[i], g = d[i + 1], b = d[i + 2];
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const sat = max - min;
+
+      if (lum > 145 && sat < 55) {
+        const lift = Math.min(255, 205 + (lum - 145) * 0.84);
+        r = r * 0.18 + lift * 0.82;
+        g = g * 0.18 + lift * 0.82;
+        b = b * 0.18 + lift * 0.82;
+      } else {
+        const contrast = 1.12;
+        r = (r - 128) * contrast + 128;
+        g = (g - 128) * contrast + 128;
+        b = (b - 128) * contrast + 128;
+        if (lum < 125) {
+          r *= 0.93; g *= 0.93; b *= 0.93;
+        }
+      }
+      d[i] = Math.max(0, Math.min(255, r));
+      d[i + 1] = Math.max(0, Math.min(255, g));
+      d[i + 2] = Math.max(0, Math.min(255, b));
+    }
+    ctx.putImageData(image, 0, 0);
     return canvas;
   }
 
@@ -340,7 +471,14 @@
   }
 
   async function addImagePage(target, item) {
-    const canvas = await decodeToCanvas(item.file);
+    const canvas = await decodeToCanvas(item.file, item.rotation);
+
+    if (item.documentMode === "auto" && item.documentDetected === null) {
+      item.documentDetected = analyseDocument(canvas);
+    }
+    const shouldEnhance = item.documentMode === "on" ||
+      (item.documentMode === "auto" && item.documentDetected === true);
+    if (shouldEnhance) enhanceDocument(canvas);
 
     // PNG preserves PNG/WEBP transparency if present; JPEG keeps photos compact.
     const jpeg = item.kind === "jpg";
@@ -435,7 +573,8 @@
 
       resultUrl = URL.createObjectURL(blob);
       downloadLink.href = resultUrl;
-      downloadLink.download = "pdfit.pdf";
+      const stamp = new Date().toISOString().slice(0, 10);
+      downloadLink.download = `PDFit-${stamp}.pdf`;
 
       const totalPages = output.getPageCount();
       resultText.textContent =
@@ -501,7 +640,7 @@
   });
 
   fileInput.addEventListener("change", () => addFiles(fileInput.files));
-  cameraInput.addEventListener("change", () => addFiles(cameraInput.files));
+  cameraInput.addEventListener("change", () => addFiles(cameraInput.files, "camera"));
 
   addMoreButton.addEventListener("click", () => fileInput.click());
   takePhotoButton.addEventListener("click", () => cameraInput.click());

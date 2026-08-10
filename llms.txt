@@ -1,0 +1,41 @@
+# PDFit
+
+PDFit is a free browser-based PDF creation and file-combining tool.
+
+Primary purpose:
+Create one PDF from existing PDFs, images and camera photos.
+
+Supported input:
+- PDF
+- JPG / JPEG
+- PNG
+- WEBP
+- Camera photos supplied by the user's browser/device
+
+Core workflow:
+1. Upload files or take a photo.
+2. Arrange source items in the desired order.
+3. Create one PDF.
+4. Download the finished PDF.
+
+Behavior:
+- Existing PDF pages are merged directly.
+- Images are converted into clean PDF pages.
+- Multi-page PDFs remain together as one draggable source item.
+- On mobile, reorder arrows are available in addition to drag-and-drop.
+
+Privacy:
+Files are processed locally in the user's web browser. Documents are not uploaded to PDFit servers and PDFit does not store the user's files.
+
+Accounts and pricing:
+- No account required.
+- No registration required.
+- Free to use.
+
+Official pages:
+Homepage: https://pdfit.co.za/
+How it works: https://pdfit.co.za/how-it-works.html
+About: https://pdfit.co.za/about.html
+Privacy: https://pdfit.co.za/privacy.html
+Terms: https://pdfit.co.za/terms.html
+Contact: https://pdfit.co.za/contact.html

@@ -1,0 +1,18 @@
+{
+  "name": "PDFit",
+  "short_name": "PDFit",
+  "description": "Create one PDF from PDFs, images and camera photos with private browser-based processing.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f5f1",
+  "theme_color": "#111714",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

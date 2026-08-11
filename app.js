@@ -26,6 +26,18 @@
   const summaryText = document.getElementById("summaryText");
   const year = document.getElementById("year");
 
+  const scannerModal = document.getElementById("scannerModal");
+  const scannerClose = document.getElementById("scannerClose");
+  const scannerVideo = document.getElementById("scannerVideo");
+  const scannerOverlay = document.getElementById("scannerOverlay");
+  const scannerViewport = document.getElementById("scannerViewport");
+  const scannerStatus = document.getElementById("scannerStatus");
+  const scannerHint = document.getElementById("scannerHint");
+  const scannerCapture = document.getElementById("scannerCapture");
+  const scannerFallback = document.getElementById("scannerFallback");
+  const scannerPhotoFallback = document.getElementById("scannerPhotoFallback");
+
+
   const MAX_FILE_MB = 150;
   const MAX_TOTAL_MB = 500;
 
@@ -33,10 +45,342 @@
   let resultUrl = null;
   let dragId = null;
 
+  let scannerStream = null;
+  let scannerTimer = null;
+  let scannerQuad = null;
+  let scannerBusy = false;
+  let scannerCvWarned = false;
+
+
   year.textContent = new Date().getFullYear();
 
   const uid = () =>
     crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+
+
+  function cvReady() {
+    return typeof window.cv !== "undefined" &&
+      window.cv &&
+      typeof window.cv.Mat === "function" &&
+      typeof window.cv.findContours === "function";
+  }
+
+  function scannerMessage(status, hint) {
+    if (status) scannerStatus.textContent = status;
+    if (hint) scannerHint.textContent = hint;
+  }
+
+  function sortQuad(points) {
+    const pts = points.map(p => ({ x:p.x, y:p.y }));
+    const sum = p => p.x + p.y;
+    const diff = p => p.y - p.x;
+
+    const tl = pts.reduce((a,b) => sum(a) < sum(b) ? a : b);
+    const br = pts.reduce((a,b) => sum(a) > sum(b) ? a : b);
+    const tr = pts.reduce((a,b) => diff(a) < diff(b) ? a : b);
+    const bl = pts.reduce((a,b) => diff(a) > diff(b) ? a : b);
+    return [tl,tr,br,bl];
+  }
+
+  function drawScannerOverlay(quad) {
+    const ctx = scannerOverlay.getContext("2d");
+    ctx.clearRect(0,0,scannerOverlay.width,scannerOverlay.height);
+
+    if (!quad) {
+      scannerCapture.classList.remove("page-found");
+      return;
+    }
+
+    ctx.save();
+    ctx.strokeStyle = "#cbe87c";
+    ctx.fillStyle = "rgba(203,232,124,.10)";
+    ctx.lineWidth = Math.max(4, scannerOverlay.width / 220);
+    ctx.lineJoin = "round";
+
+    ctx.beginPath();
+    ctx.moveTo(quad[0].x, quad[0].y);
+    quad.slice(1).forEach(p => ctx.lineTo(p.x,p.y));
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    for (const p of quad) {
+      ctx.beginPath();
+      ctx.arc(p.x,p.y,Math.max(7,scannerOverlay.width/120),0,Math.PI*2);
+      ctx.fillStyle="#cbe87c";
+      ctx.fill();
+    }
+    ctx.restore();
+
+    scannerCapture.classList.add("page-found");
+  }
+
+  function detectDocumentFromVideo() {
+    if (!scannerStream || scannerBusy || scannerVideo.readyState < 2) return;
+
+    if (!cvReady()) {
+      scannerQuad = null;
+      drawScannerOverlay(null);
+      if (!scannerCvWarned) {
+        scannerMessage("Camera ready", "Loading page detection… You can still capture a normal photo.");
+      }
+      return;
+    }
+
+    scannerCvWarned = true;
+
+    const vw = scannerVideo.videoWidth;
+    const vh = scannerVideo.videoHeight;
+    if (!vw || !vh) return;
+
+    const maxDim = 640;
+    const ratio = Math.min(1, maxDim / Math.max(vw,vh));
+    const sw = Math.max(2, Math.round(vw*ratio));
+    const sh = Math.max(2, Math.round(vh*ratio));
+
+    const sample = document.createElement("canvas");
+    sample.width = sw;
+    sample.height = sh;
+    sample.getContext("2d").drawImage(scannerVideo,0,0,sw,sh);
+
+    let src, gray, blur, edges, contours, hierarchy, kernel;
+    try {
+      src = cv.imread(sample);
+      gray = new cv.Mat();
+      blur = new cv.Mat();
+      edges = new cv.Mat();
+      contours = new cv.MatVector();
+      hierarchy = new cv.Mat();
+      kernel = cv.Mat.ones(3,3,cv.CV_8U);
+
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0);
+      cv.Canny(blur, edges, 55, 155);
+      cv.dilate(edges, edges, kernel);
+      cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+      let best = null;
+      let bestArea = 0;
+      const frameArea = sw*sh;
+
+      for (let i=0;i<contours.size();i++) {
+        const c = contours.get(i);
+        const area = Math.abs(cv.contourArea(c));
+        if (area < frameArea*0.12 || area <= bestArea) {
+          c.delete();
+          continue;
+        }
+
+        const peri = cv.arcLength(c,true);
+        const approx = new cv.Mat();
+        cv.approxPolyDP(c,approx,0.025*peri,true);
+
+        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+          const points = [];
+          for (let r=0;r<4;r++) {
+            points.push({
+              x: approx.intPtr(r,0)[0],
+              y: approx.intPtr(r,0)[1]
+            });
+          }
+
+          const ordered = sortQuad(points);
+          const xs = ordered.map(p=>p.x), ys = ordered.map(p=>p.y);
+          const width = Math.max(...xs)-Math.min(...xs);
+          const height = Math.max(...ys)-Math.min(...ys);
+
+          if (width > sw*.35 && height > sh*.35) {
+            best = ordered;
+            bestArea = area;
+          }
+        }
+
+        approx.delete();
+        c.delete();
+      }
+
+      if (best) {
+        const scaleX = vw/sw;
+        const scaleY = vh/sh;
+        scannerQuad = best.map(p=>({x:p.x*scaleX,y:p.y*scaleY}));
+        drawScannerOverlay(scannerQuad);
+        scannerMessage("Page found", "Hold steady and tap the shutter.");
+      } else {
+        scannerQuad = null;
+        drawScannerOverlay(null);
+        scannerMessage("Looking for page", "Move closer and keep the full sheet inside the frame.");
+      }
+    } catch (error) {
+      console.warn("Live document detection failed:", error);
+      scannerQuad = null;
+      drawScannerOverlay(null);
+      scannerMessage("Camera ready", "Tap the shutter to capture this photo.");
+    } finally {
+      [src,gray,blur,edges,hierarchy,kernel].forEach(m=>{ try{ if(m) m.delete(); }catch{} });
+      try{ if(contours) contours.delete(); }catch{}
+    }
+  }
+
+  function stopScanner() {
+    if (scannerTimer) {
+      clearInterval(scannerTimer);
+      scannerTimer = null;
+    }
+    if (scannerStream) {
+      scannerStream.getTracks().forEach(track => track.stop());
+      scannerStream = null;
+    }
+    scannerVideo.srcObject = null;
+    scannerQuad = null;
+    scannerBusy = false;
+    drawScannerOverlay(null);
+    scannerModal.classList.add("hidden");
+    document.body.style.overflow = "";
+  }
+
+  async function openScanner() {
+    clearError();
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      cameraInput.click();
+      return;
+    }
+
+    scannerModal.classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+    scannerCapture.disabled = true;
+    scannerMessage("Starting camera…", "Allow camera access when your browser asks.");
+
+    try {
+      scannerStream = await navigator.mediaDevices.getUserMedia({
+        video:{
+          facingMode:{ideal:"environment"},
+          width:{ideal:1920},
+          height:{ideal:1080}
+        },
+        audio:false
+      });
+
+      scannerVideo.srcObject = scannerStream;
+      await scannerVideo.play();
+
+      const vw = scannerVideo.videoWidth || 1080;
+      const vh = scannerVideo.videoHeight || 1440;
+      scannerOverlay.width = vw;
+      scannerOverlay.height = vh;
+      scannerViewport.style.aspectRatio = `${vw}/${vh}`;
+
+      scannerCapture.disabled = false;
+      scannerMessage("Looking for page", "Keep the full page visible. PDFit will outline it when detected.");
+
+      detectDocumentFromVideo();
+      scannerTimer = setInterval(detectDocumentFromVideo, 420);
+    } catch (error) {
+      console.warn("Custom scanner camera unavailable:", error);
+      stopScanner();
+      cameraInput.click();
+    }
+  }
+
+  function distance(a,b) {
+    return Math.hypot(a.x-b.x,a.y-b.y);
+  }
+
+  function warpDocumentCanvas(sourceCanvas, quad) {
+    if (!quad || !cvReady()) return sourceCanvas;
+
+    const [tl,tr,br,bl] = sortQuad(quad);
+    let outW = Math.round(Math.max(distance(tl,tr), distance(bl,br)));
+    let outH = Math.round(Math.max(distance(tl,bl), distance(tr,br)));
+
+    if (outW < 150 || outH < 150) return sourceCanvas;
+
+    const maxOut = 3200;
+    const shrink = Math.min(1,maxOut/Math.max(outW,outH));
+    outW = Math.max(2,Math.round(outW*shrink));
+    outH = Math.max(2,Math.round(outH*shrink));
+
+    let src, srcTri, dstTri, M, dst;
+    try {
+      src = cv.imread(sourceCanvas);
+
+      srcTri = cv.matFromArray(4,1,cv.CV_32FC2,[
+        tl.x,tl.y,
+        tr.x,tr.y,
+        br.x,br.y,
+        bl.x,bl.y
+      ]);
+      dstTri = cv.matFromArray(4,1,cv.CV_32FC2,[
+        0,0,
+        outW-1,0,
+        outW-1,outH-1,
+        0,outH-1
+      ]);
+
+      M = cv.getPerspectiveTransform(srcTri,dstTri);
+      dst = new cv.Mat();
+      cv.warpPerspective(
+        src,dst,M,new cv.Size(outW,outH),
+        cv.INTER_LINEAR,cv.BORDER_CONSTANT,new cv.Scalar(255,255,255,255)
+      );
+
+      const out = document.createElement("canvas");
+      out.width = outW;
+      out.height = outH;
+      cv.imshow(out,dst);
+      return out;
+    } catch (error) {
+      console.warn("Perspective correction failed:", error);
+      return sourceCanvas;
+    } finally {
+      [src,srcTri,dstTri,M,dst].forEach(m=>{ try{ if(m) m.delete(); }catch{} });
+    }
+  }
+
+  function canvasToJpegFile(canvas, name="scan.jpg") {
+    return new Promise((resolve,reject)=>{
+      canvas.toBlob(blob=>{
+        if (!blob) return reject(new Error("Could not create scan image"));
+        resolve(new File([blob],name,{type:"image/jpeg",lastModified:Date.now()}));
+      },"image/jpeg",0.92);
+    });
+  }
+
+  async function captureScannerPage() {
+    if (!scannerStream || scannerBusy || scannerVideo.readyState < 2) return;
+
+    scannerBusy = true;
+    scannerCapture.disabled = true;
+    scannerMessage("Capturing…", "Straightening and cleaning your page.");
+
+    try {
+      const frame = document.createElement("canvas");
+      frame.width = scannerVideo.videoWidth;
+      frame.height = scannerVideo.videoHeight;
+      frame.getContext("2d").drawImage(scannerVideo,0,0,frame.width,frame.height);
+
+      let finalCanvas = frame;
+      const detected = !!scannerQuad;
+
+      if (detected) {
+        finalCanvas = warpDocumentCanvas(frame,scannerQuad);
+        enhanceDocument(finalCanvas);
+      }
+
+      const file = await canvasToJpegFile(
+        finalCanvas,
+        detected ? `PDFit-scan-${Date.now()}.jpg` : `PDFit-photo-${Date.now()}.jpg`
+      );
+
+      stopScanner();
+      await addFiles([file], detected ? "scanner" : "camera");
+    } catch (error) {
+      console.error(error);
+      scannerBusy = false;
+      scannerCapture.disabled = false;
+      scannerMessage("Try again", "PDFit could not process that frame.");
+    }
+  }
 
   function formatBytes(bytes) {
     if (bytes < 1024) return `${bytes} B`;
@@ -260,7 +604,8 @@
 
       const type = document.createElement("span");
       type.className = "file-type";
-      type.textContent = `${item.kind.toUpperCase()} · ${formatBytes(item.file.size)}`;
+      type.textContent = `${item.kind.toUpperCase()} · ${formatBytes(item.file.size)}` +
+        (item.source === "scanner" ? " · SCANNED" : "");
 
       meta.append(name, type);
 
@@ -307,34 +652,36 @@
         });
         reorder.appendChild(rotateButton);
 
-        const enhanceButton = document.createElement("button");
-        enhanceButton.className = "rotate-button enhance-button";
-        enhanceButton.type = "button";
-        const enhancementOn =
-          item.documentMode === "on" ||
-          (item.documentMode === "auto" && item.documentDetected === true);
-        enhanceButton.textContent = enhancementOn ? "Original" : "Scan clean";
-        enhanceButton.setAttribute(
-          "aria-label",
-          enhancementOn
-            ? `Show original ${item.file.name}`
-            : `Apply scanned-document cleanup to ${item.file.name}`
-        );
-        enhanceButton.addEventListener("click", async () => {
-          if (enhancementOn) {
-            item.documentMode = "off";
-            render();
-            return;
-          }
+        if (item.source !== "scanner") {
+          const enhanceButton = document.createElement("button");
+          enhanceButton.className = "rotate-button enhance-button";
+          enhanceButton.type = "button";
+          const enhancementOn =
+            item.documentMode === "on" ||
+            (item.documentMode === "auto" && item.documentDetected === true);
+          enhanceButton.textContent = enhancementOn ? "Original" : "Scan clean";
+          enhanceButton.setAttribute(
+            "aria-label",
+            enhancementOn
+              ? `Show original ${item.file.name}`
+              : `Apply scanned-document cleanup to ${item.file.name}`
+          );
+          enhanceButton.addEventListener("click", async () => {
+            if (enhancementOn) {
+              item.documentMode = "off";
+              render();
+              return;
+            }
 
-          item.documentMode = "on";
-          item.analysingDocument = true;
-          render();
-          await prepareDocumentPreview(item, true);
-          item.analysingDocument = false;
-          render();
-        });
-        reorder.appendChild(enhanceButton);
+            item.documentMode = "on";
+            item.analysingDocument = true;
+            render();
+            await prepareDocumentPreview(item, true);
+            item.analysingDocument = false;
+            render();
+          });
+          reorder.appendChild(enhanceButton);
+        }
         if (img) {
           img.style.transform = `rotate(${item.rotation}deg)`;
           if (item.rotation === 90 || item.rotation === 270) {
@@ -753,8 +1100,25 @@
   fileInput.addEventListener("change", () => addFiles(fileInput.files));
   cameraInput.addEventListener("change", () => addFiles(cameraInput.files, "camera"));
 
+
+  document.querySelector('label[for="cameraInput"]')?.addEventListener("click", event => {
+    event.preventDefault();
+    openScanner();
+  });
+
+  scannerClose.addEventListener("click", stopScanner);
+  scannerCapture.addEventListener("click", captureScannerPage);
+  scannerFallback.addEventListener("click", () => {
+    stopScanner();
+    setTimeout(() => cameraInput.click(), 50);
+  });
+  scannerPhotoFallback.addEventListener("click", () => {
+    stopScanner();
+    setTimeout(() => fileInput.click(), 50);
+  });
+
   addMoreButton.addEventListener("click", () => fileInput.click());
-  takePhotoButton.addEventListener("click", () => cameraInput.click());
+  takePhotoButton.addEventListener("click", openScanner);
   createButton.addEventListener("click", createPdf);
   clearButton.addEventListener("click", clearAll);
   anotherButton.addEventListener("click", clearAll);
@@ -766,6 +1130,7 @@
   });
 
   window.addEventListener("beforeunload", () => {
+    if (scannerStream) scannerStream.getTracks().forEach(track => track.stop());
     items.forEach(cleanupItem);
     if (resultUrl) URL.revokeObjectURL(resultUrl);
   });

@@ -230,3 +230,134 @@ h1 span{color:var(--green)}
 .enhance-button{
   border-color:rgba(47,111,87,.20);
 }
+
+
+/* PDFit v2 smart document camera */
+.scanner-modal{
+  position:fixed;
+  inset:0;
+  z-index:1000;
+  display:grid;
+  place-items:center;
+  padding:0;
+  background:#07100c;
+}
+.scanner-shell{
+  width:min(100%,920px);
+  height:100dvh;
+  display:grid;
+  grid-template-rows:auto 1fr auto;
+  color:#fff;
+  background:#07100c;
+}
+.scanner-header{
+  min-height:72px;
+  padding:12px 18px;
+  display:grid;
+  grid-template-columns:44px 1fr 54px;
+  align-items:center;
+  gap:10px;
+}
+.scanner-close{
+  width:42px;height:42px;border:0;border-radius:50%;
+  color:#fff;background:rgba(255,255,255,.10);
+  font-size:28px;line-height:1;cursor:pointer;
+}
+.scanner-heading{text-align:center}
+.scanner-heading strong,.scanner-heading span{display:block}
+.scanner-heading strong{font-family:"Manrope";font-size:16px}
+.scanner-heading span{margin-top:3px;color:rgba(255,255,255,.62);font-size:11px}
+.scanner-auto{
+  justify-self:end;padding:7px 9px;border-radius:999px;
+  color:#163324;background:var(--lime);font-size:9px;font-weight:900;letter-spacing:.08em
+}
+.scanner-viewport{
+  position:relative;
+  align-self:center;
+  width:100%;
+  max-height:74dvh;
+  overflow:hidden;
+  background:#000;
+}
+.scanner-viewport video,
+.scanner-viewport canvas{
+  display:block;
+  width:100%;
+  height:100%;
+}
+.scanner-viewport video{object-fit:contain}
+.scanner-viewport canvas{
+  position:absolute;inset:0;
+  pointer-events:none;
+}
+.scanner-guide{position:absolute;inset:7%;pointer-events:none;opacity:.3}
+.scanner-guide span{position:absolute;width:38px;height:38px;border-color:#fff}
+.scanner-guide span:nth-child(1){left:0;top:0;border-left:2px solid;border-top:2px solid}
+.scanner-guide span:nth-child(2){right:0;top:0;border-right:2px solid;border-top:2px solid}
+.scanner-guide span:nth-child(3){right:0;bottom:0;border-right:2px solid;border-bottom:2px solid}
+.scanner-guide span:nth-child(4){left:0;bottom:0;border-left:2px solid;border-bottom:2px solid}
+.scanner-bottom{padding:12px 18px 20px}
+.scanner-bottom p{
+  min-height:34px;margin:0 0 10px;
+  color:rgba(255,255,255,.68);font-size:12px;line-height:1.4;text-align:center
+}
+.scanner-controls{
+  display:grid;
+  grid-template-columns:1fr 86px 1fr;
+  align-items:center;
+  gap:14px;
+}
+.scanner-secondary{
+  min-height:42px;padding:8px 10px;border:0;border-radius:12px;
+  color:rgba(255,255,255,.78);background:rgba(255,255,255,.08);
+  font-size:11px;font-weight:700;cursor:pointer
+}
+.scanner-shutter{
+  width:78px;height:78px;justify-self:center;
+  display:grid;place-items:center;
+  border:3px solid #fff;border-radius:50%;
+  background:transparent;cursor:pointer
+}
+.scanner-shutter span{width:62px;height:62px;border-radius:50%;background:#fff}
+.scanner-shutter.page-found{border-color:var(--lime)}
+.scanner-shutter.page-found span{background:var(--lime)}
+.scanner-shutter:disabled{opacity:.45;cursor:wait}
+
+/* Compact image controls: keep every action inside the thumbnail card. */
+.mobile-reorder{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:7px;
+  padding:0 10px 10px;
+}
+.move-button,.rotate-button{
+  min-width:0;
+  padding:7px 5px;
+  overflow:hidden;
+  border:1px solid var(--line);
+  border-radius:9px;
+  color:var(--muted);
+  background:rgba(255,255,255,.75);
+  font-size:10px;
+  font-weight:700;
+  line-height:1.1;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  cursor:pointer;
+}
+.rotate-button{width:auto}
+.enhance-button{
+  color:var(--green-dark);
+  border-color:rgba(47,111,87,.22);
+}
+.move-button:disabled{opacity:.3;cursor:default}
+
+@media(max-width:560px){
+  .file-grid{grid-template-columns:1fr}
+  .file-card{max-width:100%}
+  .file-preview{aspect-ratio:16/10}
+  .mobile-reorder{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .move-button,.rotate-button{font-size:10px;padding:9px 4px}
+  .scanner-header{min-height:64px}
+  .scanner-bottom{padding-bottom:max(18px,env(safe-area-inset-bottom))}
+}

@@ -59,3 +59,20 @@ IMPORTANT
     - Configure Google Search Console and Bing Webmaster Tools.
     - Submit sitemap.
     - Run PageSpeed / Rich Results / site scan.
+
+
+V2 SMART DOCUMENT CAMERA
+------------------------
+The Take photo path now tries to open PDFit's own camera interface using getUserMedia.
+
+When supported:
+- Rear camera opens inside PDFit.
+- OpenCV.js analyses live frames.
+- A green quadrilateral outlines a detected page.
+- Capture uses the detected corners for perspective correction.
+- The corrected page receives scanner-style cleanup before being added.
+- If no page is detected, the shutter still captures a normal image.
+- "Use phone camera" remains as a fallback to the device's ordinary camera picker.
+
+IMPORTANT:
+This is a browser-based scanner beta. Edge detection is heuristic and should be tested on multiple Android and iOS devices, in varied lighting and against different backgrounds.

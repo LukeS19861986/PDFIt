@@ -95,3 +95,11 @@ V2.0.2 SCANNER POLISH
 - Scanner output now attempts to match the phone's current portrait/landscape orientation.
 - Existing Rotate control remains available as a manual fallback.
 - Cache-busting updated to app.js?v=2.0.2 and styles.css?v=2.0.2.
+
+
+V2.0.3 ADAPTIVE ILLUMINATION
+----------------------------
+- Adds local/adaptive illumination correction for shadows and uneven lighting.
+- Keeps the gentler v2.0.2 cleanup profile.
+- Preserves the existing crop, white safety margin, orientation logic and UI.
+- Cache-busting updated to app.js?v=2.0.3 and styles.css?v=2.0.3.

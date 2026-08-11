@@ -932,34 +932,60 @@
 
   function enhanceDocument(canvas) {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = image.data;
 
-    // v2.0.2: deliberately restrained scanner cleanup.
-    // We lift neutral paper and gently improve ink contrast without crushing
-    // mid-tones, handwriting, stamps or faint printed detail.
+    // v2.0.3: adaptive illumination correction.
+    // Estimate the slowly-varying paper/background brightness with a heavily
+    // blurred copy, then compensate local shadows before the gentle cleanup.
+    const base = document.createElement("canvas");
+    base.width = canvas.width;
+    base.height = canvas.height;
+
+    const bctx = base.getContext("2d");
+    bctx.filter = `blur(${Math.max(12, Math.round(Math.min(canvas.width, canvas.height) * 0.025))}px)`;
+    bctx.drawImage(canvas, 0, 0);
+    bctx.filter = "none";
+
+    const original = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const background = bctx.getImageData(0, 0, base.width, base.height);
+    const d = original.data;
+    const bg = background.data;
+
     for (let i = 0; i < d.length; i += 4) {
       let r = d[i], g = d[i + 1], b = d[i + 2];
-      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+
+      const bgLum = 0.2126 * bg[i] + 0.7152 * bg[i + 1] + 0.0722 * bg[i + 2];
       const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
       const sat = max - min;
 
-      if (lum > 155 && sat < 48) {
-        const target = Math.min(252, 196 + (lum - 155) * 0.72);
-        const paperMix = 0.62;
+      // Lift local shadow regions toward a consistent paper illumination,
+      // but cap the correction to avoid flattening genuine dark content.
+      const desiredBg = 220;
+      const shadowLift = Math.max(-8, Math.min(42, (desiredBg - bgLum) * 0.34));
+      r += shadowLift;
+      g += shadowLift;
+      b += shadowLift;
+
+      // Recompute after local correction.
+      const lum2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+      // Preserve v2.0.2's restrained paper cleanup.
+      if (lum2 > 158 && sat < 50) {
+        const target = Math.min(250, 198 + (lum2 - 158) * 0.66);
+        const paperMix = 0.54;
         r = r * (1 - paperMix) + target * paperMix;
         g = g * (1 - paperMix) + target * paperMix;
         b = b * (1 - paperMix) + target * paperMix;
       } else {
-        const contrast = 1.055;
+        const contrast = 1.045;
         r = (r - 128) * contrast + 128;
         g = (g - 128) * contrast + 128;
         b = (b - 128) * contrast + 128;
 
-        if (lum < 110) {
-          r *= 0.975;
-          g *= 0.975;
-          b *= 0.975;
+        if (lum2 < 105) {
+          r *= 0.985;
+          g *= 0.985;
+          b *= 0.985;
         }
       }
 
@@ -968,7 +994,7 @@
       d[i + 2] = Math.max(0, Math.min(255, b));
     }
 
-    ctx.putImageData(image, 0, 0);
+    ctx.putImageData(original, 0, 0);
     return canvas;
   }
 

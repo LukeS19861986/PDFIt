@@ -103,3 +103,14 @@ V2.0.3 ADAPTIVE ILLUMINATION
 - Keeps the gentler v2.0.2 cleanup profile.
 - Preserves the existing crop, white safety margin, orientation logic and UI.
 - Cache-busting updated to app.js?v=2.0.3 and styles.css?v=2.0.3.
+
+
+V2.0.4 UI POLISH
+----------------
+Presentation-only refinement:
+- Cleaner scan thumbnail presentation.
+- Better spacing and typography in file cards.
+- More polished mobile button layout.
+- Slightly stronger primary-action hierarchy.
+- No changes to document detection, crop, illumination correction or PDF generation.
+- Cache-busting updated to app.js?v=2.0.4 and styles.css?v=2.0.4.

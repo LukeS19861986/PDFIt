@@ -76,3 +76,13 @@ When supported:
 
 IMPORTANT:
 This is a browser-based scanner beta. Edge detection is heuristic and should be tested on multiple Android and iOS devices, in varied lighting and against different backgrounds.
+
+
+CACHE-BUSTING
+-------------
+This build references:
+- styles.css?v=2.0.1
+- app.js?v=2.0.1
+
+When making a new deployment, increment the version string in index.html.
+This helps phones fetch the latest CSS/JS without clearing all browser data.

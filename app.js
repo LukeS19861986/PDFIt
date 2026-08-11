@@ -324,10 +324,23 @@
         cv.INTER_LINEAR,cv.BORDER_CONSTANT,new cv.Scalar(255,255,255,255)
       );
 
+      const cropped = document.createElement("canvas");
+      cropped.width = outW;
+      cropped.height = outH;
+      cv.imshow(cropped,dst);
+
+      // v2.0.2: add a small clean safety margin after perspective correction
+      // so the page edge never feels clipped or uncomfortably tight.
+      const margin = Math.max(8, Math.round(Math.min(outW, outH) * 0.018));
       const out = document.createElement("canvas");
-      out.width = outW;
-      out.height = outH;
-      cv.imshow(out,dst);
+      out.width = outW + margin * 2;
+      out.height = outH + margin * 2;
+
+      const octx = out.getContext("2d");
+      octx.fillStyle = "#ffffff";
+      octx.fillRect(0, 0, out.width, out.height);
+      octx.drawImage(cropped, margin, margin);
+
       return out;
     } catch (error) {
       console.warn("Perspective correction failed:", error);
@@ -344,6 +357,36 @@
         resolve(new File([blob],name,{type:"image/jpeg",lastModified:Date.now()}));
       },"image/jpeg",0.92);
     });
+  }
+
+  function rotateCanvas90(canvas, clockwise = true) {
+    const rotated = document.createElement("canvas");
+    rotated.width = canvas.height;
+    rotated.height = canvas.width;
+
+    const ctx = rotated.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, rotated.width, rotated.height);
+    ctx.translate(rotated.width / 2, rotated.height / 2);
+    ctx.rotate((clockwise ? 90 : -90) * Math.PI / 180);
+    ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+
+    return rotated;
+  }
+
+  function normaliseScannerOrientation(canvas) {
+    // Camera sensors commonly deliver a landscape pixel buffer even while the
+    // phone is held portrait. Match the scan to the user's current device
+    // orientation, while the existing Rotate control remains the fallback for
+    // genuinely landscape documents.
+    const phonePortrait = window.innerHeight >= window.innerWidth;
+    const scanPortrait = canvas.height >= canvas.width;
+
+    if (phonePortrait !== scanPortrait) {
+      return rotateCanvas90(canvas, true);
+    }
+
+    return canvas;
   }
 
   async function captureScannerPage() {
@@ -364,7 +407,10 @@
 
       if (detected) {
         finalCanvas = warpDocumentCanvas(frame,scannerQuad);
+        finalCanvas = normaliseScannerOrientation(finalCanvas);
         enhanceDocument(finalCanvas);
+      } else {
+        finalCanvas = normaliseScannerOrientation(finalCanvas);
       }
 
       const file = await canvasToJpegFile(
@@ -889,33 +935,39 @@
     const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const d = image.data;
 
-    // Gentle scanner-style cleanup: neutralise near-paper pixels, lift uneven
-    // paper/shadows, deepen ink and slightly reduce colour cast. It preserves
-    // coloured logos/signatures rather than forcing black and white.
+    // v2.0.2: deliberately restrained scanner cleanup.
+    // We lift neutral paper and gently improve ink contrast without crushing
+    // mid-tones, handwriting, stamps or faint printed detail.
     for (let i = 0; i < d.length; i += 4) {
       let r = d[i], g = d[i + 1], b = d[i + 2];
       const max = Math.max(r, g, b), min = Math.min(r, g, b);
       const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
       const sat = max - min;
 
-      if (lum > 145 && sat < 55) {
-        const lift = Math.min(255, 205 + (lum - 145) * 0.84);
-        r = r * 0.18 + lift * 0.82;
-        g = g * 0.18 + lift * 0.82;
-        b = b * 0.18 + lift * 0.82;
+      if (lum > 155 && sat < 48) {
+        const target = Math.min(252, 196 + (lum - 155) * 0.72);
+        const paperMix = 0.62;
+        r = r * (1 - paperMix) + target * paperMix;
+        g = g * (1 - paperMix) + target * paperMix;
+        b = b * (1 - paperMix) + target * paperMix;
       } else {
-        const contrast = 1.12;
+        const contrast = 1.055;
         r = (r - 128) * contrast + 128;
         g = (g - 128) * contrast + 128;
         b = (b - 128) * contrast + 128;
-        if (lum < 125) {
-          r *= 0.93; g *= 0.93; b *= 0.93;
+
+        if (lum < 110) {
+          r *= 0.975;
+          g *= 0.975;
+          b *= 0.975;
         }
       }
+
       d[i] = Math.max(0, Math.min(255, r));
       d[i + 1] = Math.max(0, Math.min(255, g));
       d[i + 2] = Math.max(0, Math.min(255, b));
     }
+
     ctx.putImageData(image, 0, 0);
     return canvas;
   }

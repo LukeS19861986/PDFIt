@@ -86,3 +86,12 @@ This build references:
 
 When making a new deployment, increment the version string in index.html.
 This helps phones fetch the latest CSS/JS without clearing all browser data.
+
+
+V2.0.2 SCANNER POLISH
+---------------------
+- Gentler document cleanup to preserve faint detail and handwriting.
+- 1.8% clean white safety margin added around perspective-corrected scans.
+- Scanner output now attempts to match the phone's current portrait/landscape orientation.
+- Existing Rotate control remains available as a manual fallback.
+- Cache-busting updated to app.js?v=2.0.2 and styles.css?v=2.0.2.

@@ -114,3 +114,7 @@ Presentation-only refinement:
 - Slightly stronger primary-action hierarchy.
 - No changes to document detection, crop, illumination correction or PDF generation.
 - Cache-busting updated to app.js?v=2.0.4 and styles.css?v=2.0.4.
+
+
+V2.0.5
+Added the shared green ZERO FUSS. hero signature. No functional or scanner changes.

@@ -520,6 +520,86 @@
     }
   }
 
+  let pdfPreviewLoadPromise = null;
+
+  function loadPdfPreviewEngine() {
+    if (window.pdfjsLib?.getDocument) {
+      if (window.pdfjsLib.GlobalWorkerOptions) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+          "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      }
+      return Promise.resolve(window.pdfjsLib);
+    }
+    if (pdfPreviewLoadPromise) return pdfPreviewLoadPromise;
+
+    pdfPreviewLoadPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+      script.async = true;
+      script.onload = () => {
+        if (!window.pdfjsLib?.getDocument) {
+          reject(new Error("PDF_PREVIEW_ENGINE_UNAVAILABLE"));
+          return;
+        }
+        if (window.pdfjsLib.GlobalWorkerOptions) {
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+            "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        }
+        resolve(window.pdfjsLib);
+      };
+      script.onerror = () => reject(new Error("PDF_PREVIEW_ENGINE_UNAVAILABLE"));
+      document.head.appendChild(script);
+    }).catch(error => {
+      pdfPreviewLoadPromise = null;
+      throw error;
+    });
+
+    return pdfPreviewLoadPromise;
+  }
+
+  async function preparePdfPreview(item) {
+    if (!item || item.kind !== "pdf") return;
+    let loadingTask = null;
+    let pdf = null;
+    try {
+      const pdfjsLib = await loadPdfPreviewEngine();
+      const bytes = new Uint8Array(await item.file.arrayBuffer());
+      loadingTask = pdfjsLib.getDocument({ data: bytes });
+      pdf = await loadingTask.promise;
+      if (!item.pageCount) item.pageCount = pdf.numPages || null;
+      if (!pdf.numPages) return;
+
+      const page = await pdf.getPage(1);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const targetWidth = 360;
+      const scale = Math.max(0.25, Math.min(1.5, targetWidth / Math.max(1, baseViewport.width)));
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.ceil(viewport.width));
+      canvas.height = Math.max(1, Math.ceil(viewport.height));
+      const ctx = canvas.getContext("2d", { alpha: false });
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      await page.render({
+        canvasContext: ctx,
+        viewport,
+        background: "#ffffff"
+      }).promise;
+
+      item.pdfPreview = makePreviewDataUrl(canvas);
+      canvas.width = 1;
+      canvas.height = 1;
+      try { page.cleanup(); } catch {}
+    } catch (error) {
+      console.warn("PDF thumbnail preview failed:", error);
+      item.pdfPreview = null;
+    } finally {
+      try { await pdf?.destroy?.(); } catch {}
+      try { await loadingTask?.destroy?.(); } catch {}
+    }
+  }
+
   function getTotalBytes() {
     return items.reduce((sum, item) => sum + item.file.size, 0);
   }
@@ -865,6 +945,8 @@
         documentMode: source === "camera" ? "auto" : "off",
         documentDetected: null,
         enhancedPreview: null,
+        pdfPreview: null,
+        pdfPreviewLoading: fileKind === "pdf",
         spreadsheetPreview: null,
         spreadsheetPreviewLoading: isSpreadsheetKind(fileKind),
         wordPreview: null,
@@ -875,6 +957,10 @@
 
       if (fileKind === "pdf") {
         item.pageCount = await getPdfPageCount(file);
+        preparePdfPreview(item).finally(() => {
+          item.pdfPreviewLoading = false;
+          render();
+        });
       } else if (isSpreadsheetKind(fileKind)) {
         // Build a lightweight first-sheet thumbnail in the browser. This is
         // presentation-only: the PDF conversion path remains unchanged.
@@ -925,10 +1011,17 @@
       let img = null;
 
       if (item.kind === "pdf") {
-        const documentPreview = document.createElement("div");
-        documentPreview.className = "pdf-preview";
-        documentPreview.textContent = "PDF";
-        preview.appendChild(documentPreview);
+        if (item.pdfPreview) {
+          img = document.createElement("img");
+          img.src = item.pdfPreview;
+          img.alt = "";
+          preview.appendChild(img);
+        } else {
+          const documentPreview = document.createElement("div");
+          documentPreview.className = "pdf-preview";
+          documentPreview.textContent = "PDF";
+          preview.appendChild(documentPreview);
+        }
       } else if (item.kind === "docx") {
         if (item.wordPreview) {
           img = document.createElement("img");

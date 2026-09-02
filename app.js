@@ -573,12 +573,21 @@
         documentMode: source === "camera" ? "auto" : "off",
         documentDetected: null,
         enhancedPreview: null,
+        spreadsheetPreview: null,
+        spreadsheetPreviewLoading: isSpreadsheetKind(fileKind),
         analysingDocument: source === "camera" && fileKind !== "pdf"
       };
       items.push(item);
 
       if (fileKind === "pdf") {
         item.pageCount = await getPdfPageCount(file);
+      } else if (isSpreadsheetKind(fileKind)) {
+        // Build a lightweight first-sheet thumbnail in the browser. This is
+        // presentation-only: the PDF conversion path remains unchanged.
+        prepareSpreadsheetPreview(item).finally(() => {
+          item.spreadsheetPreviewLoading = false;
+          render();
+        });
       } else if (source === "camera") {
         // Analyse camera captures immediately so the user can actually see
         // the scanner behaviour before creating the PDF.
@@ -616,11 +625,23 @@
 
       let img = null;
 
-      if (item.kind === "pdf" || isSpreadsheetKind(item.kind)) {
+      if (item.kind === "pdf") {
         const documentPreview = document.createElement("div");
         documentPreview.className = "pdf-preview";
-        documentPreview.textContent = item.kind === "pdf" ? "PDF" : item.kind.toUpperCase();
+        documentPreview.textContent = "PDF";
         preview.appendChild(documentPreview);
+      } else if (isSpreadsheetKind(item.kind)) {
+        if (item.spreadsheetPreview) {
+          img = document.createElement("img");
+          img.src = item.spreadsheetPreview;
+          img.alt = "";
+          preview.appendChild(img);
+        } else {
+          const documentPreview = document.createElement("div");
+          documentPreview.className = "pdf-preview";
+          documentPreview.textContent = item.kind.toUpperCase();
+          preview.appendChild(documentPreview);
+        }
       } else {
         img = document.createElement("img");
         const enhancementActive =
@@ -1651,6 +1672,297 @@
     }
 
     return originX + xPos[rightLocal] - (originX + xPos[startLocal]);
+  }
+
+
+  function loadSpreadsheetPreviewImage(data, extension) {
+    return new Promise((resolve, reject) => {
+      const type = extension === "png" ? "image/png" : "image/jpeg";
+      const url = URL.createObjectURL(new Blob([data], { type }));
+      const image = new Image();
+      image.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(image);
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("SPREADSHEET_PREVIEW_IMAGE_FAILED"));
+      };
+      image.src = url;
+    });
+  }
+
+  function drawSpreadsheetPreviewBorder(ctx, x, y, width, height, border, scale) {
+    ctx.strokeStyle = "#202020";
+    ctx.lineCap = "butt";
+    const draw = (x1, y1, x2, y2, rawWidth) => {
+      if (!rawWidth) return;
+      ctx.beginPath();
+      ctx.lineWidth = Math.max(0.25, rawWidth * Math.max(0.78, Math.min(1.15, scale)));
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    };
+    draw(x, y, x, y + height, border?.left || 0);
+    draw(x + width, y, x + width, y + height, border?.right || 0);
+    draw(x, y, x + width, y, border?.top || 0);
+    draw(x, y + height, x + width, y + height, border?.bottom || 0);
+  }
+
+  async function renderLegacyXlsSpreadsheetPreview(workbook, XLSX, layouts) {
+    if (!layouts?.size || !workbook?.SheetNames?.length) return null;
+
+    let sheetName = null;
+    let layout = null;
+    let sheet = null;
+    for (let i = 0; i < workbook.SheetNames.length; i++) {
+      const candidateName = workbook.SheetNames[i];
+      const candidateLayout = layouts.get(candidateName) || Array.from(layouts.values())[i];
+      const candidateSheet = workbook.Sheets[candidateName];
+      if (candidateLayout?.legacy && candidateSheet) {
+        sheetName = candidateName;
+        layout = candidateLayout;
+        sheet = candidateSheet;
+        break;
+      }
+    }
+    if (!sheetName || !layout || !sheet) return null;
+
+    const range = {
+      s: { r: layout.range.s.r, c: layout.range.s.c },
+      e: { r: layout.range.e.r, c: layout.range.e.c }
+    };
+    const colWidths = [];
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const meta = layout.cols.get(c);
+      colWidths.push(meta?.hidden ? 0 : Math.max(2, meta?.width || 48));
+    }
+    const rowHeights = [];
+    for (let r = range.s.r; r <= range.e.r; r++) {
+      const meta = layout.rows.get(r);
+      rowHeights.push(meta?.hidden ? 0 : Math.max(2, meta?.height || 15));
+    }
+
+    const totalWidth = colWidths.reduce((sum, value) => sum + value, 0);
+    const totalHeight = rowHeights.reduce((sum, value) => sum + value, 0);
+    if (!totalWidth || !totalHeight) return null;
+
+    const portrait = [595.28, 841.89];
+    const landscape = [841.89, 595.28];
+    const pageSize = layout.orientation === "landscape" ? landscape : portrait;
+    const [pageWidth, pageHeight] = pageSize;
+    const margins = xlsLegacyMargins(layout);
+    const usableWidth = pageWidth - margins.left - margins.right;
+    const usableHeight = pageHeight - margins.top - margins.bottom;
+    const scale = Math.min(
+      1,
+      usableWidth / Math.max(1, totalWidth),
+      usableHeight / Math.max(1, totalHeight)
+    );
+
+    const xPos = [0];
+    for (const width of colWidths) xPos.push(xPos[xPos.length - 1] + width * scale);
+    const yPos = [0];
+    for (const height of rowHeights) yPos.push(yPos[yPos.length - 1] + height * scale);
+    const contentWidth = xPos[xPos.length - 1];
+    const contentHeight = yPos[yPos.length - 1];
+    const originX = margins.left + Math.max(0, (usableWidth - contentWidth) / 2);
+    const originY = margins.top + Math.max(0, (usableHeight - contentHeight) / 2);
+
+    const targetWidth = layout.orientation === "landscape" ? 560 : 420;
+    const pixelScale = targetWidth / pageWidth;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(pageWidth * pixelScale));
+    canvas.height = Math.max(1, Math.round(pageHeight * pixelScale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.scale(pixelScale, pixelScale);
+    ctx.fillStyle = "#111111";
+    ctx.textBaseline = "middle";
+
+    const drawnMerges = new Set();
+    for (let r = range.s.r; r <= range.e.r; r++) {
+      const rowLocal = r - range.s.r;
+      if (rowHeights[rowLocal] <= 0) continue;
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const colLocal = c - range.s.c;
+        if (colWidths[colLocal] <= 0) continue;
+        const merge = xlsMergeForCell(layout, r, c);
+        if (merge) {
+          const key = `${merge.s.r}:${merge.s.c}:${merge.e.r}:${merge.e.c}`;
+          if (drawnMerges.has(key)) continue;
+          if (r !== merge.s.r || c !== merge.s.c) continue;
+          drawnMerges.add(key);
+        }
+
+        const startR = merge ? merge.s.r : r;
+        const endR = merge ? merge.e.r : r;
+        const startC = merge ? merge.s.c : c;
+        const endC = merge ? merge.e.c : c;
+        const localR1 = startR - range.s.r;
+        const localR2 = endR - range.s.r;
+        const localC1 = startC - range.s.c;
+        const localC2 = endC - range.s.c;
+        const x = originX + xPos[localC1];
+        const y = originY + yPos[localR1];
+        const width = xPos[localC2 + 1] - xPos[localC1];
+        const height = yPos[localR2 + 1] - yPos[localR1];
+        if (width <= 0 || height <= 0) continue;
+
+        const style = xlsStyleForCell(layout, startR, startC);
+        const border = merge ? xlsLegacyMergedBorder(layout, merge) : style;
+        if (border.left || border.right || border.top || border.bottom) {
+          drawSpreadsheetPreviewBorder(ctx, x, y, width, height, border, scale);
+        }
+
+        const source = xlsCellSource(sheet, XLSX, startR, startC);
+        if (!source.text) continue;
+        let fontSize = Math.max(5.6, Math.min(12, (style.font?.size || 11) * scale));
+        const weight = style.font?.bold ? 700 : 400;
+        const padding = Math.max(1.5, 2.4 * scale);
+        ctx.font = `${weight} ${fontSize}px Arial, Helvetica, sans-serif`;
+        let textWidth = ctx.measureText(source.text).width;
+        const maxTextWidth = Math.max(1, width - padding * 2);
+        if (textWidth > maxTextWidth && !style.wrapText && (style.horizontal === 2 || style.horizontal === 3)) {
+          while (fontSize > 5.2 && textWidth > maxTextWidth) {
+            fontSize -= 0.25;
+            ctx.font = `${weight} ${fontSize}px Arial, Helvetica, sans-serif`;
+            textWidth = ctx.measureText(source.text).width;
+          }
+        }
+
+        let textX = x + padding;
+        if (style.horizontal === 2 || style.horizontal === 6) {
+          textX = x + Math.max(padding, (width - textWidth) / 2);
+        } else if (style.horizontal === 3 || source.cell?.t === "n") {
+          textX = x + Math.max(padding, width - padding - textWidth);
+        }
+        ctx.fillText(source.text, textX, y + height / 2);
+      }
+    }
+
+    for (const image of layout.images || []) {
+      try {
+        const fromCol = image.from.col - range.s.c;
+        const toCol = image.to.col - range.s.c;
+        const fromRow = image.from.row - range.s.r;
+        const toRow = image.to.row - range.s.r;
+        if (fromCol < 0 || toCol < 0 || fromRow < 0 || toRow < 0 ||
+            fromCol >= colWidths.length || toCol >= colWidths.length ||
+            fromRow >= rowHeights.length || toRow >= rowHeights.length) continue;
+        const imageX = originX + xPos[fromCol] + colWidths[fromCol] * scale * image.from.colFrac;
+        const imageTop = originY + yPos[fromRow] + rowHeights[fromRow] * scale * image.from.rowFrac;
+        const imageRight = originX + xPos[toCol] + colWidths[toCol] * scale * image.to.colFrac;
+        const imageBottom = originY + yPos[toRow] + rowHeights[toRow] * scale * image.to.rowFrac;
+        const boxWidth = Math.max(1, imageRight - imageX);
+        const boxHeight = Math.max(1, imageBottom - imageTop);
+        const sourceImage = await loadSpreadsheetPreviewImage(image.data, image.extension);
+        const naturalWidth = sourceImage.naturalWidth || sourceImage.width;
+        const naturalHeight = sourceImage.naturalHeight || sourceImage.height;
+        const imageScale = Math.min(boxWidth / naturalWidth, boxHeight / naturalHeight);
+        const drawWidth = naturalWidth * imageScale;
+        const drawHeight = naturalHeight * imageScale;
+        ctx.drawImage(
+          sourceImage,
+          imageX + (boxWidth - drawWidth) / 2,
+          imageTop + (boxHeight - drawHeight) / 2,
+          drawWidth,
+          drawHeight
+        );
+      } catch {
+        // A broken embedded image should never stop the spreadsheet thumbnail.
+      }
+    }
+
+    ctx.restore();
+    return canvas.toDataURL("image/png");
+  }
+
+  function renderSimpleSpreadsheetPreview(workbook, XLSX) {
+    const sheetName = workbook?.SheetNames?.[0];
+    const sheet = sheetName ? workbook.Sheets[sheetName] : null;
+    if (!sheet) return null;
+    const rows = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      raw: false,
+      defval: "",
+      blankrows: false
+    });
+    if (!rows.length) return null;
+
+    const columnCount = Math.max(1, ...rows.map(row => row.length));
+    const shownRows = rows.slice(0, 38);
+    const canvas = document.createElement("canvas");
+    canvas.width = 560;
+    canvas.height = 396;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const margin = 20;
+    const titleHeight = 30;
+    const gridWidth = canvas.width - margin * 2;
+    const gridHeight = canvas.height - margin * 2 - titleHeight;
+    const cellWidth = gridWidth / Math.max(1, columnCount);
+    const rowHeight = gridHeight / Math.max(1, shownRows.length);
+    ctx.strokeStyle = "#c8ceca";
+    ctx.lineWidth = 1;
+    ctx.fillStyle = "#111714";
+    ctx.font = "700 13px Arial, Helvetica, sans-serif";
+    ctx.fillText(spreadsheetText(sheetName), margin, margin + 16);
+    ctx.font = `${Math.max(7, Math.min(10, rowHeight * 0.55))}px Arial, Helvetica, sans-serif`;
+    ctx.textBaseline = "middle";
+
+    for (let r = 0; r < shownRows.length; r++) {
+      for (let c = 0; c < columnCount; c++) {
+        const x = margin + c * cellWidth;
+        const y = margin + titleHeight + r * rowHeight;
+        ctx.strokeRect(x, y, cellWidth, rowHeight);
+        const value = spreadsheetText(shownRows[r]?.[c] ?? "");
+        if (value) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x + 2, y + 1, Math.max(1, cellWidth - 4), Math.max(1, rowHeight - 2));
+          ctx.clip();
+          ctx.fillText(value, x + 3, y + rowHeight / 2);
+          ctx.restore();
+        }
+      }
+    }
+    return canvas.toDataURL("image/png");
+  }
+
+  async function prepareSpreadsheetPreview(item) {
+    if (!isSpreadsheetKind(item?.kind)) return;
+    try {
+      const XLSX = await loadXlsxEngine();
+      const bytes = await item.file.arrayBuffer();
+      const workbook = XLSX.read(bytes, {
+        type: "array",
+        cellDates: true,
+        cellStyles: true,
+        sheetStubs: true
+      });
+      let preview = null;
+      if (item.kind === "xls") {
+        try {
+          const layouts = parseLegacyXlsLayout(new Uint8Array(bytes));
+          preview = await renderLegacyXlsSpreadsheetPreview(workbook, XLSX, layouts);
+        } catch (error) {
+          console.warn("Legacy Excel thumbnail fallback:", error);
+        }
+      }
+      if (!preview) preview = renderSimpleSpreadsheetPreview(workbook, XLSX);
+      item.spreadsheetPreview = preview;
+    } catch (error) {
+      console.warn("Spreadsheet preview failed:", error);
+      item.spreadsheetPreview = null;
+    }
   }
 
   async function addLegacyXlsSpreadsheetPages(target, workbook, XLSX, layouts) {

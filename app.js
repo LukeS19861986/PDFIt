@@ -445,12 +445,25 @@
     if (file.type === "image/jpeg" || /\.jpe?g$/i.test(file.name)) return "jpg";
     if (file.type === "image/png" || /\.png$/i.test(file.name)) return "png";
     if (file.type === "image/webp" || /\.webp$/i.test(file.name)) return "webp";
+    if (file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || /\.xlsx$/i.test(file.name)) return "xlsx";
+    if (file.type === "application/vnd.ms-excel" || /\.xls$/i.test(file.name)) return "xls";
     return "unknown";
   }
 
+  function isSpreadsheetKind(fileKind) {
+    return fileKind === "xlsx" || fileKind === "xls";
+  }
+
   function valid(file) {
-    return /\.(pdf|jpe?g|png|webp)$/i.test(file.name) ||
-      ["application/pdf", "image/jpeg", "image/png", "image/webp"].includes(file.type);
+    return /\.(pdf|jpe?g|png|webp|xlsx?)$/i.test(file.name) ||
+      [
+        "application/pdf",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel"
+      ].includes(file.type);
   }
 
   function cleanupItem(item) {
@@ -495,6 +508,25 @@
     return items.reduce((sum, item) => sum + item.file.size, 0);
   }
 
+  let xlsxLoadPromise = null;
+
+  function loadXlsxEngine() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    if (xlsxLoadPromise) return xlsxLoadPromise;
+
+    xlsxLoadPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
+      script.onload = () => window.XLSX
+        ? resolve(window.XLSX)
+        : reject(new Error("EXCEL_ENGINE_UNAVAILABLE"));
+      script.onerror = () => reject(new Error("EXCEL_ENGINE_UNAVAILABLE"));
+      document.head.appendChild(script);
+    });
+
+    return xlsxLoadPromise;
+  }
+
   async function addFiles(list, source = "files") {
     clearError();
     resetResult();
@@ -532,8 +564,10 @@
         id: uid(),
         file,
         kind: fileKind,
-        previewUrl: fileKind === "pdf" ? null : URL.createObjectURL(file),
-        pageCount: fileKind === "pdf" ? null : 1,
+        previewUrl: fileKind === "pdf" || isSpreadsheetKind(fileKind)
+          ? null
+          : URL.createObjectURL(file),
+        pageCount: fileKind === "pdf" || isSpreadsheetKind(fileKind) ? null : 1,
         rotation: 0,
         source,
         documentMode: source === "camera" ? "auto" : "off",
@@ -582,11 +616,11 @@
 
       let img = null;
 
-      if (item.kind === "pdf") {
-        const pdf = document.createElement("div");
-        pdf.className = "pdf-preview";
-        pdf.textContent = "PDF";
-        preview.appendChild(pdf);
+      if (item.kind === "pdf" || isSpreadsheetKind(item.kind)) {
+        const documentPreview = document.createElement("div");
+        documentPreview.className = "pdf-preview";
+        documentPreview.textContent = item.kind === "pdf" ? "PDF" : item.kind.toUpperCase();
+        preview.appendChild(documentPreview);
       } else {
         img = document.createElement("img");
         const enhancementActive =
@@ -676,7 +710,7 @@
 
       reorder.append(leftButton, rightButton);
 
-      if (item.kind !== "pdf") {
+      if (item.kind !== "pdf" && !isSpreadsheetKind(item.kind)) {
         const rotateButton = document.createElement("button");
         rotateButton.className = "rotate-button";
         rotateButton.type = "button";
@@ -1070,6 +1104,129 @@
     copied.forEach(page => target.addPage(page));
   }
 
+  function spreadsheetText(value) {
+    if (value === null || value === undefined) return "";
+    return String(value)
+      .replace(/\r?\n/g, " ")
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/[\u201C\u201D]/g, '"')
+      .replace(/[\u2013\u2014]/g, "-")
+      .replace(/\u2026/g, "...")
+      .replace(/[^\x20-\x7E]/g, "?")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function fitSpreadsheetText(text, font, size, maxWidth) {
+    const value = spreadsheetText(text);
+    if (!value) return "";
+    if (font.widthOfTextAtSize(value, size) <= maxWidth) return value;
+
+    let low = 0;
+    let high = value.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      const candidate = `${value.slice(0, mid)}...`;
+      if (font.widthOfTextAtSize(candidate, size) <= maxWidth) low = mid;
+      else high = mid - 1;
+    }
+    return low > 0 ? `${value.slice(0, low)}...` : "";
+  }
+
+  async function addSpreadsheetPages(target, item) {
+    const XLSX = await loadXlsxEngine();
+    const bytes = await item.file.arrayBuffer();
+    const workbook = XLSX.read(bytes, { type: "array", cellDates: true });
+
+    const font = await target.embedFont(PDFLib.StandardFonts.Helvetica);
+    const bold = await target.embedFont(PDFLib.StandardFonts.HelveticaBold);
+    const a4Landscape = [841.89, 595.28];
+    const margin = 28;
+    const titleHeight = 30;
+    const rowHeight = 20;
+    const fontSize = 8;
+    const cellPadding = 4;
+    const maxColumnsPerPage = 8;
+    const usableWidth = a4Landscape[0] - margin * 2;
+    const usableHeight = a4Landscape[1] - margin * 2 - titleHeight;
+    const rowsPerPage = Math.max(1, Math.floor(usableHeight / rowHeight));
+
+    const sheetNames = workbook.SheetNames.length ? workbook.SheetNames : ["Sheet1"];
+
+    for (const sheetName of sheetNames) {
+      const sheet = workbook.Sheets[sheetName];
+      const sourceRows = sheet
+        ? XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "", blankrows: false })
+        : [];
+      const rows = sourceRows.length ? sourceRows : [[""]];
+      const columnCount = Math.max(1, ...rows.map(row => row.length));
+
+      for (let colStart = 0; colStart < columnCount; colStart += maxColumnsPerPage) {
+        const colEnd = Math.min(columnCount, colStart + maxColumnsPerPage);
+        const visibleColumns = colEnd - colStart;
+        const cellWidth = usableWidth / visibleColumns;
+
+        for (let rowStart = 0; rowStart < rows.length; rowStart += rowsPerPage) {
+          const page = target.addPage(a4Landscape);
+          const [pageWidth, pageHeight] = a4Landscape;
+          const sheetLabel = spreadsheetText(sheetName) || "Worksheet";
+
+          page.drawText(sheetLabel, {
+            x: margin,
+            y: pageHeight - margin - 12,
+            size: 11,
+            font: bold
+          });
+
+          const pageRows = rows.slice(rowStart, rowStart + rowsPerPage);
+          pageRows.forEach((row, rowOffset) => {
+            const yTop = pageHeight - margin - titleHeight - rowOffset * rowHeight;
+            const yBottom = yTop - rowHeight;
+
+            for (let c = 0; c < visibleColumns; c++) {
+              const x = margin + c * cellWidth;
+              const value = row[colStart + c] ?? "";
+
+              page.drawRectangle({
+                x,
+                y: yBottom,
+                width: cellWidth,
+                height: rowHeight,
+                borderWidth: 0.5,
+                borderColor: PDFLib.rgb(0.82, 0.82, 0.82)
+              });
+
+              const fitted = fitSpreadsheetText(
+                value,
+                font,
+                fontSize,
+                Math.max(0, cellWidth - cellPadding * 2)
+              );
+              if (fitted) {
+                page.drawText(fitted, {
+                  x: x + cellPadding,
+                  y: yBottom + 6,
+                  size: fontSize,
+                  font
+                });
+              }
+            }
+          });
+
+          if (columnCount > maxColumnsPerPage) {
+            const rangeText = `Columns ${colStart + 1}-${colEnd}`;
+            page.drawText(rangeText, {
+              x: pageWidth - margin - font.widthOfTextAtSize(rangeText, 7),
+              y: 14,
+              size: 7,
+              font
+            });
+          }
+        }
+      }
+    }
+  }
+
   async function createPdf() {
     if (!items.length) return;
 
@@ -1094,6 +1251,8 @@
 
         if (item.kind === "pdf") {
           await addPdfPages(output, item);
+        } else if (isSpreadsheetKind(item.kind)) {
+          await addSpreadsheetPages(output, item);
         } else {
           await addImagePage(output, item);
         }
@@ -1130,6 +1289,8 @@
       if (text.startsWith("PASSWORD_PROTECTED:")) {
         const name = text.split(":").slice(1).join(":");
         message = `${name} appears to be password-protected or encrypted.`;
+      } else if (text.includes("EXCEL_ENGINE_UNAVAILABLE")) {
+        message = "Excel support could not load. Check your connection and try again.";
       } else if (/memory|allocation|buffer/i.test(text)) {
         message = "Your browser ran out of memory. Try fewer or smaller files.";
       }

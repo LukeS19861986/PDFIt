@@ -40,6 +40,20 @@
 
   const MAX_FILE_MB = 150;
   const MAX_TOTAL_MB = 500;
+  const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+  // Keep the HTML untouched. Extend the existing file picker acceptance list
+  // at runtime so DOCX support remains an invisible functionality change.
+  if (fileInput) {
+    const acceptedTypes = (fileInput.getAttribute("accept") || "")
+      .split(",")
+      .map(value => value.trim())
+      .filter(Boolean);
+    for (const value of [".docx", DOCX_MIME]) {
+      if (!acceptedTypes.includes(value)) acceptedTypes.push(value);
+    }
+    fileInput.setAttribute("accept", acceptedTypes.join(","));
+  }
 
   let items = [];
   let resultUrl = null;
@@ -447,6 +461,7 @@
     if (file.type === "image/webp" || /\.webp$/i.test(file.name)) return "webp";
     if (file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || /\.xlsx$/i.test(file.name)) return "xlsx";
     if (file.type === "application/vnd.ms-excel" || /\.xls$/i.test(file.name)) return "xls";
+    if (file.type === DOCX_MIME || /\.docx$/i.test(file.name)) return "docx";
     return "unknown";
   }
 
@@ -455,14 +470,15 @@
   }
 
   function valid(file) {
-    return /\.(pdf|jpe?g|png|webp|xlsx?)$/i.test(file.name) ||
+    return /\.(pdf|jpe?g|png|webp|xlsx?|docx)$/i.test(file.name) ||
       [
         "application/pdf",
         "image/jpeg",
         "image/png",
         "image/webp",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-excel"
+        "application/vnd.ms-excel",
+        DOCX_MIME
       ].includes(file.type);
   }
 
@@ -527,6 +543,282 @@
     return xlsxLoadPromise;
   }
 
+
+  let docxSupportLoadPromise = null;
+
+  function loadBrowserScript(src, ready, errorCode) {
+    if (ready()) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+      const existing = Array.from(document.scripts).find(script => script.src === src);
+      if (existing) {
+        const started = Date.now();
+        const timer = setInterval(() => {
+          if (ready()) {
+            clearInterval(timer);
+            resolve();
+          } else if (Date.now() - started > 15000) {
+            clearInterval(timer);
+            reject(new Error(errorCode));
+          }
+        }, 50);
+        return;
+      }
+
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.onload = () => ready() ? resolve() : reject(new Error(errorCode));
+      script.onerror = () => reject(new Error(errorCode));
+      document.head.appendChild(script);
+    });
+  }
+
+  function loadDocxSupport() {
+    if (window.docx?.renderAsync && window.html2canvas && window.JSZip) {
+      return Promise.resolve({ docx: window.docx, html2canvas: window.html2canvas });
+    }
+    if (docxSupportLoadPromise) return docxSupportLoadPromise;
+
+    docxSupportLoadPromise = (async () => {
+      await loadBrowserScript(
+        "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
+        () => Boolean(window.JSZip),
+        "DOCX_ENGINE_UNAVAILABLE"
+      );
+      await loadBrowserScript(
+        "https://cdn.jsdelivr.net/npm/docx-preview@0.4.0/dist/docx-preview.min.js",
+        () => Boolean(window.docx?.renderAsync),
+        "DOCX_ENGINE_UNAVAILABLE"
+      );
+      await loadBrowserScript(
+        "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js",
+        () => Boolean(window.html2canvas),
+        "DOCX_ENGINE_UNAVAILABLE"
+      );
+      return { docx: window.docx, html2canvas: window.html2canvas };
+    })().catch(error => {
+      docxSupportLoadPromise = null;
+      throw error;
+    });
+
+    return docxSupportLoadPromise;
+  }
+
+  function nextPaint() {
+    return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+
+  async function waitForDocxAssets(container) {
+    const images = Array.from(container.querySelectorAll("img"));
+    await Promise.allSettled(images.map(img => {
+      if (img.complete) return Promise.resolve();
+      return new Promise(resolve => {
+        img.addEventListener("load", resolve, { once: true });
+        img.addEventListener("error", resolve, { once: true });
+        setTimeout(resolve, 5000);
+      });
+    }));
+
+    if (document.fonts?.ready) {
+      try { await document.fonts.ready; } catch {}
+    }
+    await nextPaint();
+  }
+
+  async function mountDocx(file) {
+    const { docx, html2canvas } = await loadDocxSupport();
+    const host = document.createElement("div");
+    host.setAttribute("aria-hidden", "true");
+    Object.assign(host.style, {
+      position: "fixed",
+      left: "-20000px",
+      top: "0",
+      width: "1800px",
+      background: "#ffffff",
+      pointerEvents: "none",
+      zIndex: "-2147483647"
+    });
+
+    const styleContainer = document.createElement("div");
+    const bodyContainer = document.createElement("div");
+    host.append(styleContainer, bodyContainer);
+    document.body.appendChild(host);
+
+    try {
+      const bytes = await file.arrayBuffer();
+      await docx.renderAsync(bytes, bodyContainer, styleContainer, {
+        inWrapper: true,
+        breakPages: true,
+        ignoreLastRenderedPageBreak: false,
+        ignoreWidth: false,
+        ignoreHeight: false,
+        ignoreFonts: false,
+        renderHeaders: true,
+        renderFooters: true,
+        renderFootnotes: true,
+        renderEndnotes: true,
+        renderComments: false,
+        renderChanges: false,
+        experimental: true,
+        useBase64URL: true,
+        debug: false
+      });
+
+      await waitForDocxAssets(bodyContainer);
+      let pages = Array.from(bodyContainer.querySelectorAll(".docx-wrapper > section.docx"));
+      if (!pages.length) pages = Array.from(bodyContainer.querySelectorAll("section.docx"));
+      if (!pages.length) {
+        const fallback = bodyContainer.querySelector(".docx-wrapper") || bodyContainer.firstElementChild;
+        if (fallback) pages = [fallback];
+      }
+      if (!pages.length) throw new Error("DOCX_RENDER_EMPTY");
+
+      return { host, bodyContainer, pages, html2canvas };
+    } catch (error) {
+      host.remove();
+      throw error;
+    }
+  }
+
+  function docxPageMetrics(element) {
+    const rect = element.getBoundingClientRect();
+    const computed = getComputedStyle(element);
+    const width = Math.max(1, Math.ceil(rect.width || element.offsetWidth || element.scrollWidth || 816));
+    const fullHeight = Math.max(1, Math.ceil(rect.height || element.scrollHeight || element.offsetHeight || 1056));
+
+    // docx-preview renders a Word page with a CSS min-height. A long document
+    // without explicit Word page-break markers can therefore grow into one tall
+    // section. Recover the intended physical page height from that min-height
+    // and split the tall visual rendering into page-sized screenshots.
+    const minContentHeight = parseFloat(computed.minHeight) || 0;
+    const verticalExtras =
+      (parseFloat(computed.paddingTop) || 0) +
+      (parseFloat(computed.paddingBottom) || 0) +
+      (parseFloat(computed.borderTopWidth) || 0) +
+      (parseFloat(computed.borderBottomWidth) || 0);
+    const nominalHeight = minContentHeight > 20
+      ? minContentHeight + verticalExtras
+      : Math.min(fullHeight, Math.max(1, Math.ceil(element.offsetHeight || fullHeight)));
+    const pageHeight = Math.max(1, Math.min(fullHeight, Math.ceil(nominalHeight)));
+    const chunks = Math.max(1, Math.ceil((fullHeight - 1) / pageHeight));
+    return { width, pageHeight, fullHeight, chunks };
+  }
+
+  function estimatedDocxPageCount(elements) {
+    return elements.reduce((total, element) => total + docxPageMetrics(element).chunks, 0);
+  }
+
+  async function captureDocxSection(element, html2canvas, scale = 1.25) {
+    const metrics = docxPageMetrics(element);
+    const canvas = await html2canvas(element, {
+      backgroundColor: "#ffffff",
+      scale,
+      useCORS: true,
+      allowTaint: false,
+      logging: false,
+      width: metrics.width,
+      height: metrics.fullHeight,
+      scrollX: 0,
+      scrollY: 0,
+      windowWidth: Math.max(document.documentElement.clientWidth || 0, metrics.width + 40),
+      windowHeight: Math.max(document.documentElement.clientHeight || 0, Math.min(metrics.fullHeight + 40, 12000))
+    });
+
+    const result = [];
+    const sourcePageHeight = Math.max(1, Math.round(metrics.pageHeight * scale));
+    let sourceY = 0;
+    for (let part = 0; part < metrics.chunks && sourceY < canvas.height; part++) {
+      const sourceHeight = Math.min(sourcePageHeight, canvas.height - sourceY);
+      const slice = document.createElement("canvas");
+      slice.width = canvas.width;
+      slice.height = sourcePageHeight;
+      const ctx = slice.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, slice.width, slice.height);
+      ctx.drawImage(canvas, 0, sourceY, canvas.width, sourceHeight, 0, 0, slice.width, sourceHeight);
+      result.push({ canvas: slice, cssWidth: metrics.width, cssHeight: metrics.pageHeight });
+      sourceY += sourcePageHeight;
+    }
+
+    canvas.width = 1;
+    canvas.height = 1;
+    return result;
+  }
+
+  async function prepareDocxPreview(item) {
+    if (!item || item.kind !== "docx") return;
+    let mounted = null;
+    try {
+      mounted = await mountDocx(item.file);
+      item.pageCount = estimatedDocxPageCount(mounted.pages);
+      const first = await captureDocxSection(mounted.pages[0], mounted.html2canvas, 0.65);
+      if (first.length) {
+        item.wordPreview = makePreviewDataUrl(first[0].canvas);
+        first.forEach(page => {
+          page.canvas.width = 1;
+          page.canvas.height = 1;
+        });
+      }
+    } catch (error) {
+      console.warn("DOCX preview failed:", error);
+      item.wordPreview = null;
+      item.pageCount = null;
+    } finally {
+      mounted?.host?.remove();
+    }
+  }
+
+  function canvasToJpegBytes(canvas, quality = 0.93) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob(async blob => {
+        if (!blob) {
+          reject(new Error("DOCX_IMAGE_FAILED"));
+          return;
+        }
+        try {
+          resolve(new Uint8Array(await blob.arrayBuffer()));
+        } catch (error) {
+          reject(error);
+        }
+      }, "image/jpeg", quality);
+    });
+  }
+
+  async function addDocxPages(target, item) {
+    let mounted = null;
+    let pagesAdded = 0;
+    try {
+      mounted = await mountDocx(item.file);
+      for (const section of mounted.pages) {
+        const captures = await captureDocxSection(section, mounted.html2canvas, 1.35);
+        for (const capture of captures) {
+          const jpgBytes = await canvasToJpegBytes(capture.canvas, 0.94);
+          const embedded = await target.embedJpg(jpgBytes);
+          // CSS pixels use 96 dpi; PDF points use 72 dpi.
+          const pageWidth = Math.max(72, capture.cssWidth * 0.75);
+          const pageHeight = Math.max(72, capture.cssHeight * 0.75);
+          const page = target.addPage([pageWidth, pageHeight]);
+          page.drawImage(embedded, {
+            x: 0,
+            y: 0,
+            width: pageWidth,
+            height: pageHeight
+          });
+          capture.canvas.width = 1;
+          capture.canvas.height = 1;
+          pagesAdded++;
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+
+      if (!pagesAdded) throw new Error("DOCX_RENDER_EMPTY");
+      item.pageCount = pagesAdded;
+    } finally {
+      mounted?.host?.remove();
+    }
+  }
+
   async function addFiles(list, source = "files") {
     clearError();
     resetResult();
@@ -564,10 +856,10 @@
         id: uid(),
         file,
         kind: fileKind,
-        previewUrl: fileKind === "pdf" || isSpreadsheetKind(fileKind)
+        previewUrl: fileKind === "pdf" || isSpreadsheetKind(fileKind) || fileKind === "docx"
           ? null
           : URL.createObjectURL(file),
-        pageCount: fileKind === "pdf" || isSpreadsheetKind(fileKind) ? null : 1,
+        pageCount: fileKind === "pdf" || isSpreadsheetKind(fileKind) || fileKind === "docx" ? null : 1,
         rotation: 0,
         source,
         documentMode: source === "camera" ? "auto" : "off",
@@ -575,6 +867,8 @@
         enhancedPreview: null,
         spreadsheetPreview: null,
         spreadsheetPreviewLoading: isSpreadsheetKind(fileKind),
+        wordPreview: null,
+        wordPreviewLoading: fileKind === "docx",
         analysingDocument: source === "camera" && fileKind !== "pdf"
       };
       items.push(item);
@@ -586,6 +880,11 @@
         // presentation-only: the PDF conversion path remains unchanged.
         prepareSpreadsheetPreview(item).finally(() => {
           item.spreadsheetPreviewLoading = false;
+          render();
+        });
+      } else if (fileKind === "docx") {
+        prepareDocxPreview(item).finally(() => {
+          item.wordPreviewLoading = false;
           render();
         });
       } else if (source === "camera") {
@@ -630,6 +929,18 @@
         documentPreview.className = "pdf-preview";
         documentPreview.textContent = "PDF";
         preview.appendChild(documentPreview);
+      } else if (item.kind === "docx") {
+        if (item.wordPreview) {
+          img = document.createElement("img");
+          img.src = item.wordPreview;
+          img.alt = "";
+          preview.appendChild(img);
+        } else {
+          const documentPreview = document.createElement("div");
+          documentPreview.className = "pdf-preview";
+          documentPreview.textContent = "DOCX";
+          preview.appendChild(documentPreview);
+        }
       } else if (isSpreadsheetKind(item.kind)) {
         if (item.spreadsheetPreview) {
           img = document.createElement("img");
@@ -677,7 +988,7 @@
       if (item.pageCount) {
         const count = document.createElement("span");
         count.className = "page-count";
-        count.textContent = item.kind === "pdf"
+        count.textContent = item.kind === "pdf" || item.kind === "docx"
           ? `${item.pageCount} page${item.pageCount === 1 ? "" : "s"}`
           : "1 page";
         preview.appendChild(count);
@@ -2259,6 +2570,8 @@
           await addPdfPages(output, item);
         } else if (isSpreadsheetKind(item.kind)) {
           await addSpreadsheetPages(output, item);
+        } else if (item.kind === "docx") {
+          await addDocxPages(output, item);
         } else {
           await addImagePage(output, item);
         }
@@ -2297,6 +2610,10 @@
         message = `${name} appears to be password-protected or encrypted.`;
       } else if (text.includes("EXCEL_ENGINE_UNAVAILABLE")) {
         message = "Excel support could not load. Check your connection and try again.";
+      } else if (text.includes("DOCX_ENGINE_UNAVAILABLE")) {
+        message = "Word document support could not load. Check your connection and try again.";
+      } else if (text.includes("DOCX_RENDER_EMPTY") || text.includes("DOCX_IMAGE_FAILED")) {
+        message = "That Word document could not be rendered. Try saving it again as a DOCX file.";
       } else if (/memory|allocation|buffer/i.test(text)) {
         message = "Your browser ran out of memory. Try fewer or smaller files.";
       }

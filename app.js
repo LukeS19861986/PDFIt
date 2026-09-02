@@ -1143,14 +1143,9 @@
     const a4Landscape = [841.89, 595.28];
     const margin = 28;
     const titleHeight = 30;
-    const rowHeight = 20;
-    const fontSize = 8;
-    const cellPadding = 4;
-    const maxColumnsPerPage = 8;
+    const cellPadding = 3;
     const usableWidth = a4Landscape[0] - margin * 2;
     const usableHeight = a4Landscape[1] - margin * 2 - titleHeight;
-    const rowsPerPage = Math.max(1, Math.floor(usableHeight / rowHeight));
-
     const sheetNames = workbook.SheetNames.length ? workbook.SheetNames : ["Sheet1"];
 
     for (const sheetName of sheetNames) {
@@ -1161,68 +1156,67 @@
       const rows = sourceRows.length ? sourceRows : [[""]];
       const columnCount = Math.max(1, ...rows.map(row => row.length));
 
-      for (let colStart = 0; colStart < columnCount; colStart += maxColumnsPerPage) {
-        const colEnd = Math.min(columnCount, colStart + maxColumnsPerPage);
-        const visibleColumns = colEnd - colStart;
-        const cellWidth = usableWidth / visibleColumns;
+      // Keep ordinary worksheets together horizontally. The earlier simple
+      // converter split sheets after eight columns, which could turn a normal
+      // one-page Excel printout into several PDF pages. Instead, fit all used
+      // columns across one landscape A4 page and only paginate vertically when
+      // a genuinely long worksheet cannot remain readable on one page.
+      const cellWidth = usableWidth / columnCount;
+      const fitWholeSheet = rows.length <= 50 && columnCount <= 16;
+      const rowHeight = fitWholeSheet
+        ? Math.max(9, Math.min(20, usableHeight / Math.max(1, rows.length)))
+        : 18;
+      const rowsPerPage = fitWholeSheet
+        ? rows.length
+        : Math.max(1, Math.floor(usableHeight / rowHeight));
+      const fontSize = Math.max(5.5, Math.min(8, rowHeight * 0.42, cellWidth / 6.5));
 
-        for (let rowStart = 0; rowStart < rows.length; rowStart += rowsPerPage) {
-          const page = target.addPage(a4Landscape);
-          const [pageWidth, pageHeight] = a4Landscape;
-          const sheetLabel = spreadsheetText(sheetName) || "Worksheet";
+      for (let rowStart = 0; rowStart < rows.length; rowStart += rowsPerPage) {
+        const page = target.addPage(a4Landscape);
+        const [, pageHeight] = a4Landscape;
+        const sheetLabel = spreadsheetText(sheetName) || "Worksheet";
 
-          page.drawText(sheetLabel, {
-            x: margin,
-            y: pageHeight - margin - 12,
-            size: 11,
-            font: bold
-          });
+        page.drawText(sheetLabel, {
+          x: margin,
+          y: pageHeight - margin - 12,
+          size: 11,
+          font: bold
+        });
 
-          const pageRows = rows.slice(rowStart, rowStart + rowsPerPage);
-          pageRows.forEach((row, rowOffset) => {
-            const yTop = pageHeight - margin - titleHeight - rowOffset * rowHeight;
-            const yBottom = yTop - rowHeight;
+        const pageRows = rows.slice(rowStart, rowStart + rowsPerPage);
+        pageRows.forEach((row, rowOffset) => {
+          const yTop = pageHeight - margin - titleHeight - rowOffset * rowHeight;
+          const yBottom = yTop - rowHeight;
 
-            for (let c = 0; c < visibleColumns; c++) {
-              const x = margin + c * cellWidth;
-              const value = row[colStart + c] ?? "";
+          for (let c = 0; c < columnCount; c++) {
+            const x = margin + c * cellWidth;
+            const value = row[c] ?? "";
 
-              page.drawRectangle({
-                x,
-                y: yBottom,
-                width: cellWidth,
-                height: rowHeight,
-                borderWidth: 0.5,
-                borderColor: PDFLib.rgb(0.82, 0.82, 0.82)
-              });
-
-              const fitted = fitSpreadsheetText(
-                value,
-                font,
-                fontSize,
-                Math.max(0, cellWidth - cellPadding * 2)
-              );
-              if (fitted) {
-                page.drawText(fitted, {
-                  x: x + cellPadding,
-                  y: yBottom + 6,
-                  size: fontSize,
-                  font
-                });
-              }
-            }
-          });
-
-          if (columnCount > maxColumnsPerPage) {
-            const rangeText = `Columns ${colStart + 1}-${colEnd}`;
-            page.drawText(rangeText, {
-              x: pageWidth - margin - font.widthOfTextAtSize(rangeText, 7),
-              y: 14,
-              size: 7,
-              font
+            page.drawRectangle({
+              x,
+              y: yBottom,
+              width: cellWidth,
+              height: rowHeight,
+              borderWidth: 0.5,
+              borderColor: PDFLib.rgb(0.82, 0.82, 0.82)
             });
+
+            const fitted = fitSpreadsheetText(
+              value,
+              font,
+              fontSize,
+              Math.max(0, cellWidth - cellPadding * 2)
+            );
+            if (fitted) {
+              page.drawText(fitted, {
+                x: x + cellPadding,
+                y: yBottom + Math.max(2.5, (rowHeight - fontSize) / 2),
+                size: fontSize,
+                font
+              });
+            }
           }
-        }
+        });
       }
     }
   }

@@ -509,24 +509,6 @@
   }
 
   let xlsxLoadPromise = null;
-  let jsZipLoadPromise = null;
-
-  function loadJsZipEngine() {
-    if (window.JSZip) return Promise.resolve(window.JSZip);
-    if (jsZipLoadPromise) return jsZipLoadPromise;
-
-    jsZipLoadPromise = new Promise((resolve, reject) => {
-      const script = document.createElement("script");
-      script.src = "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";
-      script.onload = () => window.JSZip
-        ? resolve(window.JSZip)
-        : reject(new Error("EXCEL_LAYOUT_ENGINE_UNAVAILABLE"));
-      script.onerror = () => reject(new Error("EXCEL_LAYOUT_ENGINE_UNAVAILABLE"));
-      document.head.appendChild(script);
-    });
-
-    return jsZipLoadPromise;
-  }
 
   function loadXlsxEngine() {
     if (window.XLSX) return Promise.resolve(window.XLSX);
@@ -1125,795 +1107,117 @@
   function spreadsheetText(value) {
     if (value === null || value === undefined) return "";
     return String(value)
-      .replace(/\r\n/g, "\n")
-      .replace(/\r/g, "\n")
+      .replace(/\r?\n/g, " ")
       .replace(/[\u2018\u2019]/g, "'")
       .replace(/[\u201C\u201D]/g, '"')
       .replace(/[\u2013\u2014]/g, "-")
       .replace(/\u2026/g, "...")
-      .replace(/[^\x20-\x7E\n]/g, "?")
-      .replace(/[ \t]+/g, " ")
+      .replace(/[^\x20-\x7E]/g, "?")
+      .replace(/\s+/g, " ")
       .trim();
   }
 
-  function xmlElements(root, localName) {
-    return Array.from(root?.getElementsByTagNameNS?.("*", localName) || []);
-  }
-
-  function xmlFirst(root, localName) {
-    return xmlElements(root, localName)[0] || null;
-  }
-
-  function namespacedAttribute(node, localName) {
-    if (!node) return null;
-    const direct = node.getAttribute(localName) || node.getAttribute(`r:${localName}`);
-    if (direct !== null) return direct;
-    const attr = Array.from(node.attributes || []).find(item => item.localName === localName);
-    return attr ? attr.value : null;
-  }
-
-  function normalizeZipPath(basePath, target) {
-    if (!target) return "";
-    if (target.startsWith("/")) return target.replace(/^\/+/, "");
-    const stack = basePath.split("/").filter(Boolean);
-    stack.pop();
-    target.split("/").forEach(part => {
-      if (!part || part === ".") return;
-      if (part === "..") stack.pop();
-      else stack.push(part);
-    });
-    return stack.join("/");
-  }
-
-  function parseXml(text) {
-    return new DOMParser().parseFromString(text, "application/xml");
-  }
-
-  function parseRgbHex(value) {
-    if (!value) return null;
-    const hex = String(value).replace(/^#/, "").replace(/^FF/i, "");
-    if (!/^[0-9a-f]{6}$/i.test(hex)) return null;
-    return PDFLib.rgb(
-      parseInt(hex.slice(0, 2), 16) / 255,
-      parseInt(hex.slice(2, 4), 16) / 255,
-      parseInt(hex.slice(4, 6), 16) / 255
-    );
-  }
-
-  function xlsxColor(node) {
-    if (!node) return null;
-    const rgb = node.getAttribute("rgb");
-    if (rgb) return parseRgbHex(rgb);
-    const indexed = Number(node.getAttribute("indexed"));
-    if (Number.isFinite(indexed)) {
-      const palette = {
-        0: "000000", 1: "FFFFFF", 2: "FF0000", 3: "00FF00",
-        4: "0000FF", 5: "FFFF00", 6: "FF00FF", 7: "00FFFF",
-        8: "000000", 9: "FFFFFF", 10: "FF0000", 11: "00FF00",
-        12: "0000FF", 13: "FFFF00", 14: "FF00FF", 15: "00FFFF"
-      };
-      if (palette[indexed]) return parseRgbHex(palette[indexed]);
-    }
-    return null;
-  }
-
-  function borderWidth(style) {
-    switch (style) {
-      case "hair": return 0.25;
-      case "thin": return 0.6;
-      case "medium":
-      case "mediumDashed":
-      case "mediumDashDot":
-      case "mediumDashDotDot": return 1.25;
-      case "thick": return 2.0;
-      case "double": return 2.2;
-      case "dashed":
-      case "dotted":
-      case "dashDot":
-      case "dashDotDot": return 0.6;
-      default: return 0;
-    }
-  }
-
-  function parseXlsxStyles(stylesXml) {
-    const defaults = {
-      fonts: [{ bold: false, italic: false, size: 11, color: null }],
-      fills: [null],
-      borders: [{ left: 0, right: 0, top: 0, bottom: 0 }],
-      xfs: [{ fontId: 0, fillId: 0, borderId: 0, alignment: {} }]
-    };
-    if (!stylesXml) return defaults;
-
-    try {
-      const doc = parseXml(stylesXml);
-      const fontsNode = xmlFirst(doc, "fonts");
-      const fillsNode = xmlFirst(doc, "fills");
-      const bordersNode = xmlFirst(doc, "borders");
-      const cellXfsNode = xmlFirst(doc, "cellXfs");
-
-      const fonts = fontsNode
-        ? Array.from(fontsNode.children || []).filter(n => n.localName === "font").map(fontNode => {
-            const sizeNode = xmlFirst(fontNode, "sz");
-            const colorNode = xmlFirst(fontNode, "color");
-            return {
-              bold: !!xmlFirst(fontNode, "b"),
-              italic: !!xmlFirst(fontNode, "i"),
-              size: Math.max(5, Math.min(36, Number(sizeNode?.getAttribute("val")) || 11)),
-              color: xlsxColor(colorNode)
-            };
-          })
-        : defaults.fonts;
-
-      const fills = fillsNode
-        ? Array.from(fillsNode.children || []).filter(n => n.localName === "fill").map(fillNode => {
-            const pattern = xmlFirst(fillNode, "patternFill");
-            if (!pattern || pattern.getAttribute("patternType") !== "solid") return null;
-            return xlsxColor(xmlFirst(pattern, "fgColor"));
-          })
-        : defaults.fills;
-
-      const borders = bordersNode
-        ? Array.from(bordersNode.children || []).filter(n => n.localName === "border").map(borderNode => {
-            const side = name => {
-              const node = xmlFirst(borderNode, name);
-              return borderWidth(node?.getAttribute("style"));
-            };
-            return {
-              left: side("left"), right: side("right"),
-              top: side("top"), bottom: side("bottom")
-            };
-          })
-        : defaults.borders;
-
-      const xfs = cellXfsNode
-        ? Array.from(cellXfsNode.children || []).filter(n => n.localName === "xf").map(xfNode => {
-            const alignment = xmlFirst(xfNode, "alignment");
-            return {
-              fontId: Number(xfNode.getAttribute("fontId")) || 0,
-              fillId: Number(xfNode.getAttribute("fillId")) || 0,
-              borderId: Number(xfNode.getAttribute("borderId")) || 0,
-              alignment: alignment ? {
-                horizontal: alignment.getAttribute("horizontal") || "",
-                vertical: alignment.getAttribute("vertical") || "",
-                wrapText: alignment.getAttribute("wrapText") === "1",
-                shrinkToFit: alignment.getAttribute("shrinkToFit") === "1"
-              } : {}
-            };
-          })
-        : defaults.xfs;
-
-      return {
-        fonts: fonts.length ? fonts : defaults.fonts,
-        fills: fills.length ? fills : defaults.fills,
-        borders: borders.length ? borders : defaults.borders,
-        xfs: xfs.length ? xfs : defaults.xfs
-      };
-    } catch {
-      return defaults;
-    }
-  }
-
-  function styleForCell(layout, address) {
-    if (!layout?.styles) return null;
-    const styleIndex = layout.styleByCell?.get(address);
-    if (!Number.isFinite(styleIndex)) return null;
-    const xf = layout.styles.xfs[styleIndex] || layout.styles.xfs[0];
-    if (!xf) return null;
-    return {
-      font: layout.styles.fonts[xf.fontId] || layout.styles.fonts[0],
-      fill: layout.styles.fills[xf.fillId] || null,
-      border: layout.styles.borders[xf.borderId] || layout.styles.borders[0],
-      alignment: xf.alignment || {}
-    };
-  }
-
-  function parsePrintArea(ref, sheetName, XLSX) {
-    if (!ref) return null;
-    const parts = String(ref).split(",");
-    let minR = Infinity, minC = Infinity, maxR = -1, maxC = -1;
-    for (let part of parts) {
-      part = part.trim();
-      const bang = part.lastIndexOf("!");
-      if (bang >= 0) {
-        const rawName = part.slice(0, bang).replace(/^'/, "").replace(/'$/, "").replace(/''/g, "'");
-        if (rawName !== sheetName) continue;
-        part = part.slice(bang + 1);
-      }
-      part = part.replace(/\$/g, "");
-      try {
-        const range = XLSX.utils.decode_range(part);
-        minR = Math.min(minR, range.s.r);
-        minC = Math.min(minC, range.s.c);
-        maxR = Math.max(maxR, range.e.r);
-        maxC = Math.max(maxC, range.e.c);
-      } catch {
-        // Ignore malformed defined-name ranges.
-      }
-    }
-    return maxR >= 0 ? { s: { r: minR, c: minC }, e: { r: maxR, c: maxC } } : null;
-  }
-
-  function sheetPrintArea(workbook, sheetName, sheetIndex, XLSX) {
-    const names = workbook?.Workbook?.Names || [];
-    for (const item of names) {
-      if (item?.Name !== "_xlnm.Print_Area") continue;
-      if (Number.isFinite(item.Sheet) && item.Sheet !== sheetIndex) continue;
-      const parsed = parsePrintArea(item.Ref, sheetName, XLSX);
-      if (parsed) return parsed;
-    }
-    return null;
-  }
-
-  function columnWidthPoints(sheet, columnIndex) {
-    const meta = sheet?.["!cols"]?.[columnIndex];
-    if (meta?.hidden) return 0;
-    if (Number.isFinite(meta?.wpx)) return Math.max(2, meta.wpx * 0.75);
-    if (Number.isFinite(meta?.wch)) return Math.max(8, meta.wch * 5.55 + 4);
-    if (Number.isFinite(meta?.width)) return Math.max(8, meta.width * 5.55 + 4);
-    return 48;
-  }
-
-  function rowHeightPoints(sheet, rowIndex) {
-    const meta = sheet?.["!rows"]?.[rowIndex];
-    if (meta?.hidden) return 0;
-    if (Number.isFinite(meta?.hpt)) return Math.max(2, meta.hpt);
-    if (Number.isFinite(meta?.hpx)) return Math.max(2, meta.hpx * 0.75);
-    return 15;
-  }
-
-  function cumulativePositions(values) {
-    const out = [0];
-    for (const value of values) out.push(out[out.length - 1] + value);
-    return out;
-  }
-
-  function rangeContains(range, r, c) {
-    return r >= range.s.r && r <= range.e.r && c >= range.s.c && c <= range.e.c;
-  }
-
-  function mergeForCell(merges, r, c) {
-    return merges.find(range => rangeContains(range, r, c)) || null;
-  }
-
-  function cellValue(sheet, XLSX, r, c) {
-    const address = XLSX.utils.encode_cell({ r, c });
-    const cell = sheet?.[address];
-    if (!cell) return { text: "", cell: null, address };
-    let value = cell.w;
-    if (value === undefined || value === null) value = cell.v;
-    if (value instanceof Date) value = value.toLocaleDateString();
-    return { text: spreadsheetText(value), cell, address };
-  }
-
-  function breakLongToken(token, font, size, maxWidth) {
-    if (!token) return [""];
-    if (font.widthOfTextAtSize(token, size) <= maxWidth) return [token];
-    const parts = [];
-    let current = "";
-    for (const ch of token) {
-      const candidate = current + ch;
-      if (current && font.widthOfTextAtSize(candidate, size) > maxWidth) {
-        parts.push(current);
-        current = ch;
-      } else {
-        current = candidate;
-      }
-    }
-    if (current) parts.push(current);
-    return parts;
-  }
-
-  function wrapSpreadsheetText(text, font, size, maxWidth, maxLines = 10) {
+  function fitSpreadsheetText(text, font, size, maxWidth) {
     const value = spreadsheetText(text);
-    if (!value || maxWidth <= 1) return [];
-    const paragraphs = value.split("\n");
-    const lines = [];
+    if (!value) return "";
+    if (font.widthOfTextAtSize(value, size) <= maxWidth) return value;
 
-    for (const paragraph of paragraphs) {
-      const words = paragraph.split(/\s+/).filter(Boolean);
-      if (!words.length) {
-        lines.push("");
-        continue;
-      }
-      let line = "";
-      for (const rawWord of words) {
-        const pieces = breakLongToken(rawWord, font, size, maxWidth);
-        for (const word of pieces) {
-          const candidate = line ? `${line} ${word}` : word;
-          if (!line || font.widthOfTextAtSize(candidate, size) <= maxWidth) {
-            line = candidate;
-          } else {
-            lines.push(line);
-            line = word;
-            if (lines.length >= maxLines) break;
-          }
-        }
-        if (lines.length >= maxLines) break;
-      }
-      if (line && lines.length < maxLines) lines.push(line);
-      if (lines.length >= maxLines) break;
+    let low = 0;
+    let high = value.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      const candidate = `${value.slice(0, mid)}...`;
+      if (font.widthOfTextAtSize(candidate, size) <= maxWidth) low = mid;
+      else high = mid - 1;
     }
-
-    if (lines.length === maxLines) {
-      const last = lines[maxLines - 1];
-      if (last && !last.endsWith("...")) {
-        let clipped = last;
-        while (clipped.length && font.widthOfTextAtSize(`${clipped}...`, size) > maxWidth) {
-          clipped = clipped.slice(0, -1);
-        }
-        lines[maxLines - 1] = clipped ? `${clipped}...` : "";
-      }
-    }
-    return lines;
-  }
-
-  function drawCellBorder(page, x, y, width, height, border, scale) {
-    const black = PDFLib.rgb(0.12, 0.12, 0.12);
-    const draw = (x1, y1, x2, y2, rawWidth) => {
-      if (!rawWidth) return;
-      page.drawLine({
-        start: { x: x1, y: y1 },
-        end: { x: x2, y: y2 },
-        thickness: Math.max(0.25, rawWidth * Math.max(0.7, Math.min(1.4, scale))),
-        color: black
-      });
-    };
-    draw(x, y, x, y + height, border?.left || 0);
-    draw(x + width, y, x + width, y + height, border?.right || 0);
-    draw(x, y + height, x + width, y + height, border?.top || 0);
-    draw(x, y, x + width, y, border?.bottom || 0);
-  }
-
-  function drawFallbackGrid(page, x, y, width, height) {
-    page.drawRectangle({
-      x, y, width, height,
-      borderWidth: 0.45,
-      borderColor: PDFLib.rgb(0.78, 0.78, 0.78)
-    });
-  }
-
-  function pageMarginsFromLayout(layout) {
-    const source = layout?.pageMargins || {};
-    const toPoints = (value, fallback) => {
-      const inches = Number(value);
-      if (!Number.isFinite(inches)) return fallback;
-      return Math.max(12, Math.min(72, inches * 72));
-    };
-    return {
-      left: toPoints(source.left, 24),
-      right: toPoints(source.right, 24),
-      top: toPoints(source.top, 24),
-      bottom: toPoints(source.bottom, 24)
-    };
-  }
-
-  function chooseSpreadsheetPage(contentWidth, contentHeight, layout) {
-    const portrait = [595.28, 841.89];
-    const landscape = [841.89, 595.28];
-    const margins = pageMarginsFromLayout(layout);
-    const scaleFor = size => Math.min(
-      (size[0] - margins.left - margins.right) / Math.max(1, contentWidth),
-      (size[1] - margins.top - margins.bottom) / Math.max(1, contentHeight)
-    );
-    if (layout?.orientation === "portrait") return { size: portrait, margins };
-    if (layout?.orientation === "landscape") return { size: landscape, margins };
-    return scaleFor(portrait) >= scaleFor(landscape)
-      ? { size: portrait, margins }
-      : { size: landscape, margins };
-  }
-
-  async function parseXlsxLayout(bytes, workbook, XLSX) {
-    const empty = new Map();
-    let JSZip;
-    try {
-      JSZip = await loadJsZipEngine();
-    } catch {
-      return empty;
-    }
-
-    try {
-      const zip = await JSZip.loadAsync(bytes);
-      const workbookXml = await zip.file("xl/workbook.xml")?.async("text");
-      const workbookRelsXml = await zip.file("xl/_rels/workbook.xml.rels")?.async("text");
-      const stylesXml = await zip.file("xl/styles.xml")?.async("text");
-      if (!workbookXml || !workbookRelsXml) return empty;
-
-      const styles = parseXlsxStyles(stylesXml || "");
-      const wbDoc = parseXml(workbookXml);
-      const relDoc = parseXml(workbookRelsXml);
-      const rels = new Map();
-      xmlElements(relDoc, "Relationship").forEach(rel => {
-        const id = rel.getAttribute("Id");
-        const target = rel.getAttribute("Target");
-        if (id && target) rels.set(id, normalizeZipPath("xl/workbook.xml", target));
-      });
-
-      const sheets = xmlElements(wbDoc, "sheet");
-      const definedNames = xmlElements(wbDoc, "definedName");
-      const out = new Map();
-
-      for (let i = 0; i < sheets.length; i++) {
-        const sheetNode = sheets[i];
-        const name = sheetNode.getAttribute("name") || workbook.SheetNames[i];
-        const relId = namespacedAttribute(sheetNode, "id");
-        const sheetPath = rels.get(relId);
-        if (!name || !sheetPath || !zip.file(sheetPath)) continue;
-
-        const sheetXml = await zip.file(sheetPath).async("text");
-        const sheetDoc = parseXml(sheetXml);
-        const styleByCell = new Map();
-        xmlElements(sheetDoc, "c").forEach(cellNode => {
-          const address = cellNode.getAttribute("r");
-          const styleIndex = Number(cellNode.getAttribute("s"));
-          if (address && Number.isFinite(styleIndex)) styleByCell.set(address, styleIndex);
-        });
-
-        let printArea = null;
-        for (const node of definedNames) {
-          if (node.getAttribute("name") !== "_xlnm.Print_Area") continue;
-          const localSheetId = Number(node.getAttribute("localSheetId"));
-          if (Number.isFinite(localSheetId) && localSheetId !== i) continue;
-          printArea = parsePrintArea(node.textContent, name, XLSX);
-          if (printArea) break;
-        }
-
-        const pageSetup = xmlFirst(sheetDoc, "pageSetup");
-        const pageMargins = xmlFirst(sheetDoc, "pageMargins");
-        const layout = {
-          styles,
-          styleByCell,
-          printArea,
-          orientation: pageSetup?.getAttribute("orientation") || "",
-          fitToOne: pageSetup?.getAttribute("fitToWidth") === "1" &&
-            pageSetup?.getAttribute("fitToHeight") === "1",
-          pageMargins: pageMargins ? {
-            left: pageMargins.getAttribute("left"),
-            right: pageMargins.getAttribute("right"),
-            top: pageMargins.getAttribute("top"),
-            bottom: pageMargins.getAttribute("bottom")
-          } : null,
-          images: []
-        };
-
-        const drawingNode = xmlFirst(sheetDoc, "drawing");
-        const drawingRelId = namespacedAttribute(drawingNode, "id");
-        if (drawingRelId) {
-          const sheetFile = sheetPath.split("/").pop();
-          const sheetRelsPath = `${sheetPath.slice(0, sheetPath.lastIndexOf("/"))}/_rels/${sheetFile}.rels`;
-          const sheetRelsXml = await zip.file(sheetRelsPath)?.async("text");
-          if (sheetRelsXml) {
-            const sheetRelsDoc = parseXml(sheetRelsXml);
-            const drawingRel = xmlElements(sheetRelsDoc, "Relationship")
-              .find(node => node.getAttribute("Id") === drawingRelId);
-            const drawingTarget = drawingRel?.getAttribute("Target");
-            const drawingPath = normalizeZipPath(sheetPath, drawingTarget);
-            const drawingXml = drawingPath && zip.file(drawingPath)
-              ? await zip.file(drawingPath).async("text")
-              : null;
-
-            if (drawingXml) {
-              const drawingDoc = parseXml(drawingXml);
-              const drawingFile = drawingPath.split("/").pop();
-              const drawingRelsPath = `${drawingPath.slice(0, drawingPath.lastIndexOf("/"))}/_rels/${drawingFile}.rels`;
-              const drawingRelsXml = await zip.file(drawingRelsPath)?.async("text");
-              const drawingRels = new Map();
-              if (drawingRelsXml) {
-                const drawingRelsDoc = parseXml(drawingRelsXml);
-                xmlElements(drawingRelsDoc, "Relationship").forEach(rel => {
-                  const id = rel.getAttribute("Id");
-                  const target = rel.getAttribute("Target");
-                  if (id && target) drawingRels.set(id, normalizeZipPath(drawingPath, target));
-                });
-              }
-
-              const readMarker = marker => {
-                if (!marker) return null;
-                const number = localName => Number(xmlFirst(marker, localName)?.textContent || 0);
-                return {
-                  col: number("col"), row: number("row"),
-                  colOff: number("colOff") / 12700,
-                  rowOff: number("rowOff") / 12700
-                };
-              };
-
-              const anchors = [
-                ...xmlElements(drawingDoc, "twoCellAnchor"),
-                ...xmlElements(drawingDoc, "oneCellAnchor")
-              ];
-
-              for (const anchor of anchors) {
-                const from = readMarker(xmlFirst(anchor, "from"));
-                if (!from) continue;
-                const to = readMarker(xmlFirst(anchor, "to"));
-                const ext = xmlFirst(anchor, "ext");
-                const blip = xmlFirst(anchor, "blip");
-                const embedId = namespacedAttribute(blip, "embed");
-                const mediaPath = drawingRels.get(embedId);
-                if (!mediaPath || !zip.file(mediaPath)) continue;
-                const extension = mediaPath.split(".").pop()?.toLowerCase();
-                if (!["png", "jpg", "jpeg"].includes(extension)) continue;
-                const data = await zip.file(mediaPath).async("uint8array");
-                layout.images.push({
-                  from,
-                  to: to || null,
-                  widthPt: to ? null : Number(ext?.getAttribute("cx") || 0) / 12700,
-                  heightPt: to ? null : Number(ext?.getAttribute("cy") || 0) / 12700,
-                  extension,
-                  data
-                });
-              }
-            }
-          }
-        }
-
-        out.set(name, layout);
-      }
-      return out;
-    } catch {
-      return empty;
-    }
-  }
-
-  async function drawSpreadsheetImage(target, page, image, x, y, width, height) {
-    try {
-      const embedded = image.extension === "png"
-        ? await target.embedPng(image.data)
-        : await target.embedJpg(image.data);
-      if (!embedded || width <= 0 || height <= 0) return;
-      page.drawImage(embedded, { x, y, width, height });
-    } catch {
-      // Ignore unsupported or damaged embedded worksheet images.
-    }
+    return low > 0 ? `${value.slice(0, low)}...` : "";
   }
 
   async function addSpreadsheetPages(target, item) {
     const XLSX = await loadXlsxEngine();
     const bytes = await item.file.arrayBuffer();
-    const workbook = XLSX.read(bytes, {
-      type: "array",
-      cellDates: true,
-      cellStyles: true,
-      cellNF: true
-    });
+    const workbook = XLSX.read(bytes, { type: "array", cellDates: true });
 
-    const regular = await target.embedFont(PDFLib.StandardFonts.Helvetica);
+    const font = await target.embedFont(PDFLib.StandardFonts.Helvetica);
     const bold = await target.embedFont(PDFLib.StandardFonts.HelveticaBold);
-    const layouts = item.kind === "xlsx"
-      ? await parseXlsxLayout(bytes, workbook, XLSX)
-      : new Map();
+    const a4Landscape = [841.89, 595.28];
+    const margin = 28;
+    const titleHeight = 30;
+    const cellPadding = 3;
+    const usableWidth = a4Landscape[0] - margin * 2;
+    const usableHeight = a4Landscape[1] - margin * 2 - titleHeight;
     const sheetNames = workbook.SheetNames.length ? workbook.SheetNames : ["Sheet1"];
 
-    for (let sheetIndex = 0; sheetIndex < sheetNames.length; sheetIndex++) {
-      const sheetName = sheetNames[sheetIndex];
+    for (const sheetName of sheetNames) {
       const sheet = workbook.Sheets[sheetName];
-      if (!sheet) continue;
-      const layout = layouts.get(sheetName) || null;
+      const sourceRows = sheet
+        ? XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "", blankrows: false })
+        : [];
+      const rows = sourceRows.length ? sourceRows : [[""]];
+      const columnCount = Math.max(1, ...rows.map(row => row.length));
 
-      let range = layout?.printArea || sheetPrintArea(workbook, sheetName, sheetIndex, XLSX);
-      if (!range) {
-        try {
-          range = XLSX.utils.decode_range(sheet["!ref"] || "A1:A1");
-        } catch {
-          range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-        }
-      }
+      // Keep ordinary worksheets together horizontally. The earlier simple
+      // converter split sheets after eight columns, which could turn a normal
+      // one-page Excel printout into several PDF pages. Instead, fit all used
+      // columns across one landscape A4 page and only paginate vertically when
+      // a genuinely long worksheet cannot remain readable on one page.
+      const cellWidth = usableWidth / columnCount;
+      const fitWholeSheet = rows.length <= 50 && columnCount <= 16;
+      const rowHeight = fitWholeSheet
+        ? Math.max(9, Math.min(20, usableHeight / Math.max(1, rows.length)))
+        : 18;
+      const rowsPerPage = fitWholeSheet
+        ? rows.length
+        : Math.max(1, Math.floor(usableHeight / rowHeight));
+      const fontSize = Math.max(5.5, Math.min(8, rowHeight * 0.42, cellWidth / 6.5));
 
-      // Embedded images can sit in blank rows above the first populated cell.
-      // Expand the render range just enough to keep those anchors visible.
-      for (const image of layout?.images || []) {
-        range.s.r = Math.min(range.s.r, image.from.row);
-        range.s.c = Math.min(range.s.c, image.from.col);
-        if (image.to) {
-          range.e.r = Math.max(range.e.r, image.to.row);
-          range.e.c = Math.max(range.e.c, image.to.col);
-        }
-      }
+      for (let rowStart = 0; rowStart < rows.length; rowStart += rowsPerPage) {
+        const page = target.addPage(a4Landscape);
+        const [, pageHeight] = a4Landscape;
+        const sheetLabel = spreadsheetText(sheetName) || "Worksheet";
 
-      const colIndexes = [];
-      const rawColWidths = [];
-      for (let c = range.s.c; c <= range.e.c; c++) {
-        const width = columnWidthPoints(sheet, c);
-        if (width <= 0) continue;
-        colIndexes.push(c);
-        rawColWidths.push(width);
-      }
-      const rowIndexes = [];
-      const rawRowHeights = [];
-      for (let r = range.s.r; r <= range.e.r; r++) {
-        const height = rowHeightPoints(sheet, r);
-        if (height <= 0) continue;
-        rowIndexes.push(r);
-        rawRowHeights.push(height);
-      }
-      if (!colIndexes.length || !rowIndexes.length) continue;
+        page.drawText(sheetLabel, {
+          x: margin,
+          y: pageHeight - margin - 12,
+          size: 11,
+          font: bold
+        });
 
-      const totalWidth = rawColWidths.reduce((sum, value) => sum + value, 0);
-      const totalHeight = rawRowHeights.reduce((sum, value) => sum + value, 0);
-      const pageChoice = chooseSpreadsheetPage(totalWidth, totalHeight, layout);
-      const [pageWidth, pageHeight] = pageChoice.size;
-      const { margins } = pageChoice;
-      const usableWidth = pageWidth - margins.left - margins.right;
-      const usableHeight = pageHeight - margins.top - margins.bottom;
-      const wholeSheetScale = Math.min(
-        1,
-        usableWidth / Math.max(1, totalWidth),
-        usableHeight / Math.max(1, totalHeight)
-      );
-      const onePageCandidate = layout?.fitToOne ||
-        (rowIndexes.length <= 90 && colIndexes.length <= 26 && wholeSheetScale >= 0.42);
+        const pageRows = rows.slice(rowStart, rowStart + rowsPerPage);
+        pageRows.forEach((row, rowOffset) => {
+          const yTop = pageHeight - margin - titleHeight - rowOffset * rowHeight;
+          const yBottom = yTop - rowHeight;
 
-      const fallbackStyle = !layout?.styleByCell?.size;
-      const merges = (sheet["!merges"] || []).filter(merge =>
-        merge.e.r >= range.s.r && merge.s.r <= range.e.r &&
-        merge.e.c >= range.s.c && merge.s.c <= range.e.c
-      );
+          for (let c = 0; c < columnCount; c++) {
+            const x = margin + c * cellWidth;
+            const value = row[c] ?? "";
 
-      const renderPage = async (rowsForPage, scale) => {
-        const page = target.addPage(pageChoice.size);
-        const colWidths = rawColWidths.map(value => value * scale);
-        const pageRawRowHeights = rowsForPage.map(r => rowHeightPoints(sheet, r));
-        const rowHeights = pageRawRowHeights.map(value => value * scale);
-        const xPos = cumulativePositions(colWidths);
-        const yPos = cumulativePositions(rowHeights);
-        const colPosition = new Map(colIndexes.map((c, i) => [c, i]));
-        const rowPosition = new Map(rowsForPage.map((r, i) => [r, i]));
-        const contentHeight = yPos[yPos.length - 1];
-        const originX = margins.left + Math.max(0, (usableWidth - xPos[xPos.length - 1]) / 2);
-        const topY = pageHeight - margins.top - Math.max(0, (usableHeight - contentHeight) / 2);
-        const drawnMerges = new Set();
-
-        for (const r of rowsForPage) {
-          const rowLocal = rowPosition.get(r);
-          for (const c of colIndexes) {
-            const colLocal = colPosition.get(c);
-            const merge = mergeForCell(merges, r, c);
-            if (merge) {
-              const key = `${merge.s.r}:${merge.s.c}:${merge.e.r}:${merge.e.c}`;
-              if (drawnMerges.has(key)) continue;
-              if (!rowPosition.has(merge.s.r) || !rowPosition.has(merge.e.r) ||
-                  !colPosition.has(merge.s.c) || !colPosition.has(merge.e.c)) {
-                continue;
-              }
-              drawnMerges.add(key);
-            }
-
-            const startR = merge ? merge.s.r : r;
-            const endR = merge ? merge.e.r : r;
-            const startC = merge ? merge.s.c : c;
-            const endC = merge ? merge.e.c : c;
-            const localR1 = rowPosition.get(startR);
-            const localR2 = rowPosition.get(endR);
-            const localC1 = colPosition.get(startC);
-            const localC2 = colPosition.get(endC);
-            if ([localR1, localR2, localC1, localC2].some(v => v === undefined)) continue;
-
-            const x = originX + xPos[localC1];
-            const width = xPos[localC2 + 1] - xPos[localC1];
-            const yTop = topY - yPos[localR1];
-            const yBottom = topY - yPos[localR2 + 1];
-            const height = yTop - yBottom;
-            const source = cellValue(sheet, XLSX, startR, startC);
-            const style = styleForCell(layout, source.address);
-
-            if (style?.fill) {
-              page.drawRectangle({ x, y: yBottom, width, height, color: style.fill });
-            }
-
-            if (style?.border && Object.values(style.border).some(Boolean)) {
-              drawCellBorder(page, x, yBottom, width, height, style.border, scale);
-            } else if (fallbackStyle) {
-              drawFallbackGrid(page, x, yBottom, width, height);
-            }
-
-            if (!source.text) continue;
-            const fontInfo = style?.font || { bold: false, size: 11 };
-            const selectedFont = fontInfo.bold ? bold : regular;
-            const baseSize = Math.max(5.5, Math.min(16, (fontInfo.size || 11) * scale));
-            const padding = Math.max(1.5, Math.min(4, 3 * scale));
-            const maxTextWidth = Math.max(1, width - padding * 2);
-            const maxTextHeight = Math.max(1, height - padding * 2);
-            let fontSize = baseSize;
-            let lineHeight = fontSize * 1.15;
-            let maxLines = Math.max(1, Math.floor(maxTextHeight / lineHeight));
-            let lines = wrapSpreadsheetText(source.text, selectedFont, fontSize, maxTextWidth, maxLines);
-
-            if (style?.alignment?.shrinkToFit && lines.length > 1) {
-              while (fontSize > 5 && lines.length > 1) {
-                fontSize -= 0.4;
-                lineHeight = fontSize * 1.15;
-                maxLines = Math.max(1, Math.floor(maxTextHeight / lineHeight));
-                lines = wrapSpreadsheetText(source.text, selectedFont, fontSize, maxTextWidth, maxLines);
-              }
-            }
-            if (!lines.length) continue;
-
-            const totalTextHeight = lines.length * lineHeight;
-            let firstBaseline;
-            const vertical = style?.alignment?.vertical;
-            if (vertical === "top") {
-              firstBaseline = yTop - padding - fontSize;
-            } else if (vertical === "bottom") {
-              firstBaseline = yBottom + padding + totalTextHeight - lineHeight + (lineHeight - fontSize) * 0.3;
-            } else {
-              firstBaseline = yBottom + (height + totalTextHeight) / 2 - lineHeight + (lineHeight - fontSize) * 0.3;
-            }
-
-            lines.forEach((line, index) => {
-              const textWidth = selectedFont.widthOfTextAtSize(line, fontSize);
-              const horizontal = style?.alignment?.horizontal;
-              let textX = x + padding;
-              if (horizontal === "center" || horizontal === "centerContinuous") {
-                textX = x + Math.max(padding, (width - textWidth) / 2);
-              } else if (horizontal === "right" || (!horizontal && source.cell?.t === "n")) {
-                textX = x + Math.max(padding, width - padding - textWidth);
-              }
-              page.drawText(line, {
-                x: textX,
-                y: firstBaseline - index * lineHeight,
-                size: fontSize,
-                font: selectedFont,
-                color: fontInfo.color || PDFLib.rgb(0.05, 0.05, 0.05)
-              });
+            page.drawRectangle({
+              x,
+              y: yBottom,
+              width: cellWidth,
+              height: rowHeight,
+              borderWidth: 0.5,
+              borderColor: PDFLib.rgb(0.82, 0.82, 0.82)
             });
+
+            const fitted = fitSpreadsheetText(
+              value,
+              font,
+              fontSize,
+              Math.max(0, cellWidth - cellPadding * 2)
+            );
+            if (fitted) {
+              page.drawText(fitted, {
+                x: x + cellPadding,
+                y: yBottom + Math.max(2.5, (rowHeight - fontSize) / 2),
+                size: fontSize,
+                font
+              });
+            }
           }
-        }
-
-        // Draw embedded worksheet images last so logos and artwork appear above cells.
-        for (const image of layout?.images || []) {
-          const fromCol = colPosition.get(image.from.col);
-          const fromRow = rowPosition.get(image.from.row);
-          if (fromCol === undefined || fromRow === undefined) continue;
-          const imageX = originX + xPos[fromCol] + image.from.colOff * scale;
-          const imageTop = topY - yPos[fromRow] - image.from.rowOff * scale;
-          let imageWidth;
-          let imageHeight;
-          if (image.to) {
-            const toCol = colPosition.get(image.to.col);
-            const toRow = rowPosition.get(image.to.row);
-            if (toCol === undefined || toRow === undefined) continue;
-            const imageRight = originX + xPos[toCol] + image.to.colOff * scale;
-            const imageBottom = topY - yPos[toRow] - image.to.rowOff * scale;
-            imageWidth = imageRight - imageX;
-            imageHeight = imageTop - imageBottom;
-          } else {
-            imageWidth = (image.widthPt || 0) * scale;
-            imageHeight = (image.heightPt || 0) * scale;
-          }
-          await drawSpreadsheetImage(
-            target,
-            page,
-            image,
-            imageX,
-            imageTop - imageHeight,
-            imageWidth,
-            imageHeight
-          );
-        }
-      };
-
-      if (onePageCandidate) {
-        await renderPage(rowIndexes, wholeSheetScale);
-        continue;
+        });
       }
-
-      // For genuinely long worksheets, preserve the original column proportions
-      // and split only between rows. This avoids the old horizontal fragmentation.
-      const widthScale = Math.min(1, usableWidth / Math.max(1, totalWidth));
-      const rowsPerPage = [];
-      let current = [];
-      let currentHeight = 0;
-      for (const r of rowIndexes) {
-        const scaledHeight = rowHeightPoints(sheet, r) * widthScale;
-        if (current.length && currentHeight + scaledHeight > usableHeight) {
-          rowsPerPage.push(current);
-          current = [];
-          currentHeight = 0;
-        }
-        current.push(r);
-        currentHeight += scaledHeight;
-      }
-      if (current.length) rowsPerPage.push(current);
-      for (const pageRows of rowsPerPage) await renderPage(pageRows, widthScale);
     }
   }
 

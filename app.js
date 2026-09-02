@@ -1133,10 +1133,710 @@
     return low > 0 ? `${value.slice(0, low)}...` : "";
   }
 
+  function xlsU16(view, offset) {
+    return view.getUint16(offset, true);
+  }
+
+  function xlsU32(view, offset) {
+    return view.getUint32(offset, true);
+  }
+
+  function xlsF64(view, offset) {
+    return view.getFloat64(offset, true);
+  }
+
+  function xlsConcat(parts) {
+    const total = parts.reduce((sum, part) => sum + part.length, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      out.set(part, offset);
+      offset += part.length;
+    }
+    return out;
+  }
+
+  function xlsUtf16Name(bytes, offset, byteLength) {
+    let out = "";
+    for (let i = 0; i + 1 < byteLength; i += 2) {
+      const code = bytes[offset + i] | (bytes[offset + i + 1] << 8);
+      if (!code) break;
+      out += String.fromCharCode(code);
+    }
+    return out;
+  }
+
+  function xlsWorkbookStream(sourceBytes) {
+    const bytes = sourceBytes instanceof Uint8Array ? sourceBytes : new Uint8Array(sourceBytes);
+    if (bytes.length < 512) return null;
+    const signature = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    if (!signature.every((value, i) => bytes[i] === value)) return null;
+
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const sectorSize = 1 << xlsU16(view, 30);
+    const miniSectorSize = 1 << xlsU16(view, 32);
+    const fatCount = xlsU32(view, 44);
+    const firstDirectorySector = xlsU32(view, 48);
+    const miniCutoff = xlsU32(view, 56);
+    const firstMiniFatSector = xlsU32(view, 60);
+    const miniFatCount = xlsU32(view, 64);
+    const firstDifatSector = xlsU32(view, 68);
+    const difatCount = xlsU32(view, 72);
+    const FREE = 0xFFFFFFFF;
+    const END = 0xFFFFFFFE;
+
+    const sector = sectorId => {
+      const start = (sectorId + 1) * sectorSize;
+      const end = Math.min(bytes.length, start + sectorSize);
+      return start >= 0 && start < bytes.length ? bytes.subarray(start, end) : new Uint8Array();
+    };
+
+    const difat = [];
+    for (let i = 0; i < 109; i++) {
+      const value = xlsU32(view, 76 + i * 4);
+      if (value !== FREE && value !== END) difat.push(value);
+    }
+
+    let difatSector = firstDifatSector;
+    for (let i = 0; i < difatCount && difatSector !== FREE && difatSector !== END; i++) {
+      const chunk = sector(difatSector);
+      if (chunk.length < sectorSize) break;
+      const chunkView = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      const entries = sectorSize / 4;
+      for (let j = 0; j < entries - 1; j++) {
+        const value = xlsU32(chunkView, j * 4);
+        if (value !== FREE && value !== END) difat.push(value);
+      }
+      difatSector = xlsU32(chunkView, (entries - 1) * 4);
+    }
+
+    const fat = [];
+    for (const fatSector of difat.slice(0, fatCount)) {
+      const chunk = sector(fatSector);
+      const chunkView = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      for (let offset = 0; offset + 4 <= chunk.length; offset += 4) {
+        fat.push(xlsU32(chunkView, offset));
+      }
+    }
+
+    const followChain = (start, table, limit = 200000) => {
+      const ids = [];
+      const seen = new Set();
+      let current = start >>> 0;
+      while (current !== END && current !== FREE && current < table.length && !seen.has(current) && ids.length < limit) {
+        ids.push(current);
+        seen.add(current);
+        current = table[current] >>> 0;
+      }
+      return ids;
+    };
+
+    const directoryBytes = xlsConcat(followChain(firstDirectorySector, fat).map(sector));
+    const directory = [];
+    for (let offset = 0; offset + 128 <= directoryBytes.length; offset += 128) {
+      const entry = directoryBytes.subarray(offset, offset + 128);
+      const entryView = new DataView(entry.buffer, entry.byteOffset, entry.byteLength);
+      const nameLength = xlsU16(entryView, 64);
+      const name = nameLength >= 2 ? xlsUtf16Name(entry, 0, Math.min(64, nameLength - 2)) : "";
+      directory.push({
+        name,
+        type: entry[66],
+        start: xlsU32(entryView, 116),
+        size: xlsU32(entryView, 120)
+      });
+    }
+
+    const workbookEntry = directory.find(entry => entry.type === 2 && (entry.name === "Workbook" || entry.name === "Book"));
+    if (!workbookEntry) return null;
+
+    const readRegularStream = entry => xlsConcat(followChain(entry.start, fat).map(sector)).subarray(0, entry.size);
+    if (workbookEntry.size >= miniCutoff) return readRegularStream(workbookEntry);
+
+    const root = directory.find(entry => entry.type === 5);
+    if (!root) return null;
+    const rootStream = readRegularStream(root);
+    const miniFat = [];
+    if (miniFatCount && firstMiniFatSector !== FREE && firstMiniFatSector !== END) {
+      const miniFatBytes = xlsConcat(followChain(firstMiniFatSector, fat).slice(0, miniFatCount).map(sector));
+      const miniView = new DataView(miniFatBytes.buffer, miniFatBytes.byteOffset, miniFatBytes.byteLength);
+      for (let offset = 0; offset + 4 <= miniFatBytes.length; offset += 4) miniFat.push(xlsU32(miniView, offset));
+    }
+    if (!miniFat.length) return null;
+    const miniParts = followChain(workbookEntry.start, miniFat).map(miniId => {
+      const start = miniId * miniSectorSize;
+      return rootStream.subarray(start, start + miniSectorSize);
+    });
+    return xlsConcat(miniParts).subarray(0, workbookEntry.size);
+  }
+
+  function xlsBiffRecords(workbookBytes, start = 0) {
+    const out = [];
+    const view = new DataView(workbookBytes.buffer, workbookBytes.byteOffset, workbookBytes.byteLength);
+    let pos = start;
+    while (pos + 4 <= workbookBytes.length) {
+      const id = xlsU16(view, pos);
+      const length = xlsU16(view, pos + 2);
+      const payloadStart = pos + 4;
+      const payloadEnd = payloadStart + length;
+      if (payloadEnd > workbookBytes.length) break;
+      out.push({ id, length, pos, payload: workbookBytes.subarray(payloadStart, payloadEnd) });
+      pos = payloadEnd;
+      if (start && id === 0x000A) break;
+    }
+    return out;
+  }
+
+  function xlsFont(payload) {
+    if (payload.length < 16) return { size: 11, bold: false };
+    const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    return {
+      size: Math.max(5, Math.min(36, xlsU16(view, 0) / 20 || 11)),
+      bold: xlsU16(view, 6) >= 700
+    };
+  }
+
+  function xlsBorderWidth(style) {
+    switch (style) {
+      case 1: return 0.6;
+      case 2: return 1.35;
+      case 3:
+      case 4:
+      case 7:
+      case 8:
+      case 9:
+      case 10: return 0.7;
+      case 5: return 2.0;
+      case 6: return 2.2;
+      case 11:
+      case 12:
+      case 13: return 1.25;
+      default: return 0;
+    }
+  }
+
+  function xlsXf(payload) {
+    if (payload.length < 20) return null;
+    const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    const border1 = xlsU32(view, 10);
+    const alignment = payload[6];
+    return {
+      fontIndex: xlsU16(view, 0),
+      horizontal: alignment & 0x07,
+      wrapText: !!(alignment & 0x08),
+      left: xlsBorderWidth(border1 & 0x0F),
+      right: xlsBorderWidth((border1 >>> 4) & 0x0F),
+      top: xlsBorderWidth((border1 >>> 8) & 0x0F),
+      bottom: xlsBorderWidth((border1 >>> 12) & 0x0F)
+    };
+  }
+
+  function xlsSheetName(payload) {
+    if (payload.length < 8) return "";
+    const count = payload[6];
+    const wide = !!(payload[7] & 0x01);
+    if (wide) {
+      let out = "";
+      for (let i = 0; i < count && 8 + i * 2 + 1 < payload.length; i++) {
+        out += String.fromCharCode(payload[8 + i * 2] | (payload[9 + i * 2] << 8));
+      }
+      return out;
+    }
+    let out = "";
+    for (let i = 0; i < count && 8 + i < payload.length; i++) out += String.fromCharCode(payload[8 + i]);
+    return out;
+  }
+
+  function xlsExtractPngs(buffer) {
+    const images = [];
+    const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    for (let i = 0; i + 8 <= buffer.length; i++) {
+      let match = true;
+      for (let j = 0; j < sig.length; j++) if (buffer[i + j] !== sig[j]) { match = false; break; }
+      if (!match) continue;
+      let pos = i + 8;
+      let end = -1;
+      while (pos + 12 <= buffer.length) {
+        const length = ((buffer[pos] << 24) | (buffer[pos + 1] << 16) | (buffer[pos + 2] << 8) | buffer[pos + 3]) >>> 0;
+        if (length > buffer.length - pos - 12) break;
+        const type = String.fromCharCode(buffer[pos + 4], buffer[pos + 5], buffer[pos + 6], buffer[pos + 7]);
+        pos += 12 + length;
+        if (type === "IEND") { end = pos; break; }
+      }
+      if (end > i) {
+        images.push({ extension: "png", data: buffer.slice(i, end) });
+        i = end - 1;
+      }
+    }
+    return images;
+  }
+
+  function xlsEscherAnchors(buffer) {
+    const anchors = [];
+    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    const walk = (start, end) => {
+      let pos = start;
+      while (pos + 8 <= end) {
+        const verInst = xlsU16(view, pos);
+        const type = xlsU16(view, pos + 2);
+        const length = xlsU32(view, pos + 4);
+        const payloadStart = pos + 8;
+        const payloadEnd = payloadStart + length;
+        if (payloadEnd > end) break;
+        if ((verInst & 0x0F) === 0x0F) {
+          walk(payloadStart, payloadEnd);
+        } else if (type === 0xF010 && length >= 18) {
+          const flag = xlsU16(view, payloadStart);
+          anchors.push({
+            flag,
+            from: {
+              col: xlsU16(view, payloadStart + 2),
+              colFrac: xlsU16(view, payloadStart + 4) / 1024,
+              row: xlsU16(view, payloadStart + 6),
+              rowFrac: xlsU16(view, payloadStart + 8) / 256
+            },
+            to: {
+              col: xlsU16(view, payloadStart + 10),
+              colFrac: xlsU16(view, payloadStart + 12) / 1024,
+              row: xlsU16(view, payloadStart + 14),
+              rowFrac: xlsU16(view, payloadStart + 16) / 256
+            }
+          });
+        }
+        pos = payloadEnd;
+      }
+    };
+    walk(0, buffer.length);
+    return anchors;
+  }
+
+  function parseLegacyXlsLayout(sourceBytes) {
+    const workbookBytes = xlsWorkbookStream(sourceBytes);
+    if (!workbookBytes) return null;
+    const globalRecords = xlsBiffRecords(workbookBytes);
+    const bounds = [];
+    const fonts = [];
+    const xfs = [];
+    const drawingGroupParts = [];
+    let inDrawingGroup = false;
+
+    let fontRecordIndex = 0;
+    for (const record of globalRecords) {
+      if (record.id === 0x0085 && record.payload.length >= 8) {
+        const v = new DataView(record.payload.buffer, record.payload.byteOffset, record.payload.byteLength);
+        bounds.push({ offset: xlsU32(v, 0), name: xlsSheetName(record.payload) });
+      } else if (record.id === 0x0031) {
+        const fontIndex = fontRecordIndex < 4 ? fontRecordIndex : fontRecordIndex + 1;
+        fonts[fontIndex] = xlsFont(record.payload);
+        fontRecordIndex++;
+      } else if (record.id === 0x00E0) {
+        xfs.push(xlsXf(record.payload));
+      }
+
+      if (record.id === 0x00EB) {
+        drawingGroupParts.push(record.payload);
+        inDrawingGroup = true;
+      } else if (record.id === 0x003C && inDrawingGroup) {
+        drawingGroupParts.push(record.payload);
+      } else if (inDrawingGroup) {
+        inDrawingGroup = false;
+      }
+    }
+
+    const globalImages = drawingGroupParts.length ? xlsExtractPngs(xlsConcat(drawingGroupParts)) : [];
+    let imageCursor = 0;
+    const sheets = new Map();
+
+    for (let sheetIndex = 0; sheetIndex < bounds.length; sheetIndex++) {
+      const bound = bounds[sheetIndex];
+      const sheetRecords = xlsBiffRecords(workbookBytes, bound.offset);
+      const cols = new Map();
+      const rows = new Map();
+      const styleByCell = new Map();
+      const merges = [];
+      let range = null;
+      let orientation = "";
+      let fitToOne = false;
+      const pageMargins = {};
+      const drawingParts = [];
+      let inDrawing = false;
+
+      const setStyle = (r, c, xf) => styleByCell.set(`${r}:${c}`, xf);
+
+      for (const record of sheetRecords) {
+        const p = record.payload;
+        const v = new DataView(p.buffer, p.byteOffset, p.byteLength);
+        if (record.id === 0x0200 && p.length >= 12) {
+          const firstRow = xlsU32(v, 0);
+          const lastRow = xlsU32(v, 4);
+          const firstCol = xlsU16(v, 8);
+          const lastCol = xlsU16(v, 10);
+          range = { s: { r: firstRow, c: firstCol }, e: { r: Math.max(firstRow, lastRow - 1), c: Math.max(firstCol, lastCol - 1) } };
+        } else if (record.id === 0x007D && p.length >= 12) {
+          const first = xlsU16(v, 0);
+          const last = Math.min(255, xlsU16(v, 2));
+          const rawWidth = xlsU16(v, 4);
+          const flags = xlsU16(v, 8);
+          const width = Math.max(2, (rawWidth / 256) * 5.55 + 4);
+          for (let c = first; c <= last; c++) cols.set(c, { width, hidden: !!(flags & 0x0001) });
+        } else if (record.id === 0x0208 && p.length >= 16) {
+          const row = xlsU16(v, 0);
+          const height = xlsU16(v, 6) / 20;
+          rows.set(row, { height: Math.max(2, height || 15), hidden: false });
+        } else if (record.id === 0x00E5 && p.length >= 2) {
+          const count = xlsU16(v, 0);
+          for (let i = 0; i < count && 2 + i * 8 + 8 <= p.length; i++) {
+            const off = 2 + i * 8;
+            merges.push({
+              s: { r: xlsU16(v, off), c: xlsU16(v, off + 4) },
+              e: { r: xlsU16(v, off + 2), c: xlsU16(v, off + 6) }
+            });
+          }
+        } else if (record.id === 0x00A1 && p.length >= 12) {
+          const fitWidth = xlsU16(v, 6);
+          const fitHeight = xlsU16(v, 8);
+          const flags = xlsU16(v, 10);
+          orientation = flags & 0x0002 ? "portrait" : "landscape";
+          fitToOne = fitWidth === 1 && fitHeight === 1;
+        } else if ([0x0026, 0x0027, 0x0028, 0x0029].includes(record.id) && p.length >= 8) {
+          const key = record.id === 0x0026 ? "left" : record.id === 0x0027 ? "right" : record.id === 0x0028 ? "top" : "bottom";
+          pageMargins[key] = xlsF64(v, 0);
+        } else if ([0x00FD, 0x0201, 0x0203, 0x027E, 0x0006, 0x0204, 0x0205].includes(record.id) && p.length >= 6) {
+          setStyle(xlsU16(v, 0), xlsU16(v, 2), xlsU16(v, 4));
+        } else if (record.id === 0x00BE && p.length >= 6) {
+          const r = xlsU16(v, 0);
+          const firstCol = xlsU16(v, 2);
+          const lastCol = xlsU16(v, p.length - 2);
+          for (let c = firstCol; c <= lastCol; c++) {
+            const off = 4 + (c - firstCol) * 2;
+            if (off + 2 <= p.length - 2) setStyle(r, c, xlsU16(v, off));
+          }
+        } else if (record.id === 0x00BD && p.length >= 12) {
+          const r = xlsU16(v, 0);
+          const firstCol = xlsU16(v, 2);
+          const lastCol = xlsU16(v, p.length - 2);
+          for (let c = firstCol; c <= lastCol; c++) {
+            const off = 4 + (c - firstCol) * 6;
+            if (off + 2 <= p.length - 2) setStyle(r, c, xlsU16(v, off));
+          }
+        }
+
+        if (record.id === 0x00EC) {
+          drawingParts.push(record.payload);
+          inDrawing = true;
+        } else if (record.id === 0x003C && inDrawing) {
+          drawingParts.push(record.payload);
+        } else if (inDrawing) {
+          inDrawing = false;
+        }
+      }
+
+      if (!range) range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
+      const anchors = drawingParts.length ? xlsEscherAnchors(xlsConcat(drawingParts)) : [];
+      const images = [];
+      for (const anchor of anchors) {
+        const image = globalImages[imageCursor++];
+        if (!image) break;
+        images.push({ ...image, ...anchor });
+        range.s.r = Math.min(range.s.r, anchor.from.row);
+        range.s.c = Math.min(range.s.c, anchor.from.col);
+        range.e.r = Math.max(range.e.r, anchor.to.row);
+        range.e.c = Math.max(range.e.c, anchor.to.col);
+      }
+
+      sheets.set(bound.name || `Sheet${sheetIndex + 1}`, {
+        legacy: true,
+        range,
+        cols,
+        rows,
+        merges,
+        styleByCell,
+        fonts,
+        xfs,
+        orientation,
+        fitToOne,
+        pageMargins,
+        images
+      });
+    }
+
+    return sheets;
+  }
+
+  function xlsStyleForCell(layout, r, c) {
+    const xfIndex = layout?.styleByCell?.get(`${r}:${c}`);
+    const xf = Number.isFinite(xfIndex) ? layout.xfs?.[xfIndex] : null;
+    if (!xf) return { font: { size: 11, bold: false }, left: 0, right: 0, top: 0, bottom: 0, horizontal: 0, wrapText: false };
+    return {
+      ...xf,
+      font: layout.fonts?.[xf.fontIndex] || { size: 11, bold: false }
+    };
+  }
+
+  function xlsMergeForCell(layout, r, c) {
+    return (layout?.merges || []).find(merge =>
+      r >= merge.s.r && r <= merge.e.r && c >= merge.s.c && c <= merge.e.c
+    ) || null;
+  }
+
+  function xlsCellSource(sheet, XLSX, r, c) {
+    const address = XLSX.utils.encode_cell({ r, c });
+    const cell = sheet?.[address];
+    if (!cell) return { text: "", cell: null, address };
+    let value = cell.w;
+    if (value === undefined || value === null) value = cell.v;
+    if (value instanceof Date) value = value.toLocaleDateString();
+    return { text: spreadsheetText(value), cell, address };
+  }
+
+  function xlsLegacyMargins(layout) {
+    const source = layout?.pageMargins || {};
+    const pointMargin = (value, fallback) => {
+      const inches = Number(value);
+      if (!Number.isFinite(inches)) return fallback;
+      return Math.max(fallback, Math.min(72, inches * 72));
+    };
+    return {
+      left: pointMargin(source.left, 24),
+      right: pointMargin(source.right, 24),
+      top: pointMargin(source.top, 26),
+      bottom: pointMargin(source.bottom, 26)
+    };
+  }
+
+  function xlsLegacyMergedBorder(layout, merge) {
+    let left = 0, right = 0, top = 0, bottom = 0;
+    for (let r = merge.s.r; r <= merge.e.r; r++) {
+      left = Math.max(left, xlsStyleForCell(layout, r, merge.s.c).left || 0);
+      right = Math.max(right, xlsStyleForCell(layout, r, merge.e.c).right || 0);
+    }
+    for (let c = merge.s.c; c <= merge.e.c; c++) {
+      top = Math.max(top, xlsStyleForCell(layout, merge.s.r, c).top || 0);
+      bottom = Math.max(bottom, xlsStyleForCell(layout, merge.e.r, c).bottom || 0);
+    }
+    return { left, right, top, bottom };
+  }
+
+  function xlsDrawBorder(page, x, y, width, height, border, scale) {
+    const black = PDFLib.rgb(0.08, 0.08, 0.08);
+    const draw = (x1, y1, x2, y2, rawWidth) => {
+      if (!rawWidth) return;
+      page.drawLine({
+        start: { x: x1, y: y1 },
+        end: { x: x2, y: y2 },
+        thickness: Math.max(0.25, rawWidth * Math.max(0.78, Math.min(1.15, scale))),
+        color: black
+      });
+    };
+    draw(x, y, x, y + height, border?.left || 0);
+    draw(x + width, y, x + width, y + height, border?.right || 0);
+    draw(x, y + height, x + width, y + height, border?.top || 0);
+    draw(x, y, x + width, y, border?.bottom || 0);
+  }
+
+  function xlsLegacyTextWidth(layout, sheet, XLSX, r, c, range, xPos, originX) {
+    const startLocal = c - range.s.c;
+    let rightLocal = startLocal + 1;
+    let currentCol = c;
+    let currentStyle = xlsStyleForCell(layout, r, c);
+
+    while (currentCol < range.e.c && currentStyle.right === 0) {
+      const nextCol = currentCol + 1;
+      const nextSource = xlsCellSource(sheet, XLSX, r, nextCol);
+      if (nextSource.text) break;
+      const nextStyle = xlsStyleForCell(layout, r, nextCol);
+      if (nextStyle.left !== 0) break;
+      currentCol = nextCol;
+      rightLocal = currentCol - range.s.c + 1;
+      currentStyle = nextStyle;
+    }
+
+    return originX + xPos[rightLocal] - (originX + xPos[startLocal]);
+  }
+
+  async function addLegacyXlsSpreadsheetPages(target, workbook, XLSX, layouts) {
+    if (!layouts?.size) return false;
+    const regular = await target.embedFont(PDFLib.StandardFonts.Helvetica);
+    const bold = await target.embedFont(PDFLib.StandardFonts.HelveticaBold);
+    const portrait = [595.28, 841.89];
+    const landscape = [841.89, 595.28];
+    let pagesAdded = 0;
+
+    for (let sheetIndex = 0; sheetIndex < workbook.SheetNames.length; sheetIndex++) {
+      const sheetName = workbook.SheetNames[sheetIndex];
+      const sheet = workbook.Sheets[sheetName];
+      const layout = layouts.get(sheetName) || Array.from(layouts.values())[sheetIndex];
+      if (!sheet || !layout?.legacy) continue;
+
+      const range = {
+        s: { r: layout.range.s.r, c: layout.range.s.c },
+        e: { r: layout.range.e.r, c: layout.range.e.c }
+      };
+      const colWidths = [];
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const meta = layout.cols.get(c);
+        colWidths.push(meta?.hidden ? 0 : Math.max(2, meta?.width || 48));
+      }
+      const rowHeights = [];
+      for (let r = range.s.r; r <= range.e.r; r++) {
+        const meta = layout.rows.get(r);
+        rowHeights.push(meta?.hidden ? 0 : Math.max(2, meta?.height || 15));
+      }
+
+      const totalWidth = colWidths.reduce((sum, value) => sum + value, 0);
+      const totalHeight = rowHeights.reduce((sum, value) => sum + value, 0);
+      if (!totalWidth || !totalHeight) continue;
+
+      const pageSize = layout.orientation === "landscape" ? landscape : portrait;
+      const [pageWidth, pageHeight] = pageSize;
+      const margins = xlsLegacyMargins(layout);
+      const usableWidth = pageWidth - margins.left - margins.right;
+      const usableHeight = pageHeight - margins.top - margins.bottom;
+      const scale = Math.min(
+        1,
+        usableWidth / Math.max(1, totalWidth),
+        usableHeight / Math.max(1, totalHeight)
+      );
+      const xPos = [0];
+      for (const width of colWidths) xPos.push(xPos[xPos.length - 1] + width * scale);
+      const yPos = [0];
+      for (const height of rowHeights) yPos.push(yPos[yPos.length - 1] + height * scale);
+      const contentWidth = xPos[xPos.length - 1];
+      const contentHeight = yPos[yPos.length - 1];
+      const originX = margins.left + Math.max(0, (usableWidth - contentWidth) / 2);
+      const topY = pageHeight - margins.top - Math.max(0, (usableHeight - contentHeight) / 2);
+      const page = target.addPage(pageSize);
+      pagesAdded++;
+      const drawnMerges = new Set();
+
+      for (let r = range.s.r; r <= range.e.r; r++) {
+        const rowLocal = r - range.s.r;
+        if (rowHeights[rowLocal] <= 0) continue;
+        for (let c = range.s.c; c <= range.e.c; c++) {
+          const colLocal = c - range.s.c;
+          if (colWidths[colLocal] <= 0) continue;
+          const merge = xlsMergeForCell(layout, r, c);
+          if (merge) {
+            const key = `${merge.s.r}:${merge.s.c}:${merge.e.r}:${merge.e.c}`;
+            if (drawnMerges.has(key)) continue;
+            if (r !== merge.s.r || c !== merge.s.c) continue;
+            drawnMerges.add(key);
+          }
+
+          const startR = merge ? merge.s.r : r;
+          const endR = merge ? merge.e.r : r;
+          const startC = merge ? merge.s.c : c;
+          const endC = merge ? merge.e.c : c;
+          const localR1 = startR - range.s.r;
+          const localR2 = endR - range.s.r;
+          const localC1 = startC - range.s.c;
+          const localC2 = endC - range.s.c;
+          const x = originX + xPos[localC1];
+          const width = xPos[localC2 + 1] - xPos[localC1];
+          const yTop = topY - yPos[localR1];
+          const yBottom = topY - yPos[localR2 + 1];
+          const height = yTop - yBottom;
+          if (width <= 0 || height <= 0) continue;
+
+          const style = xlsStyleForCell(layout, startR, startC);
+          const border = merge ? xlsLegacyMergedBorder(layout, merge) : style;
+          if (border.left || border.right || border.top || border.bottom) {
+            xlsDrawBorder(page, x, yBottom, width, height, border, scale);
+          }
+
+          const source = xlsCellSource(sheet, XLSX, startR, startC);
+          if (!source.text) continue;
+          const selectedFont = style.font?.bold ? bold : regular;
+          let fontSize = Math.max(5.6, Math.min(12, (style.font?.size || 11) * scale));
+          const padding = Math.max(1.5, 2.4 * scale);
+          let textBoxWidth = width;
+          if (!merge && style.horizontal !== 2 && style.horizontal !== 3) {
+            textBoxWidth = Math.max(width, xlsLegacyTextWidth(layout, sheet, XLSX, r, c, range, xPos, originX));
+          }
+          const maxTextWidth = Math.max(1, textBoxWidth - padding * 2);
+          let text = source.text;
+          let textWidth = selectedFont.widthOfTextAtSize(text, fontSize);
+
+          if (textWidth > maxTextWidth && !style.wrapText) {
+            while (fontSize > 5.2 && textWidth > maxTextWidth) {
+              fontSize -= 0.25;
+              textWidth = selectedFont.widthOfTextAtSize(text, fontSize);
+            }
+          }
+
+          const horizontal = style.horizontal;
+          let textX = x + padding;
+          if (horizontal === 2 || horizontal === 6) {
+            textX = x + Math.max(padding, (width - textWidth) / 2);
+          } else if (horizontal === 3 || source.cell?.t === "n") {
+            textX = x + Math.max(padding, width - padding - textWidth);
+          }
+          const textY = yBottom + Math.max(1.5, (height - fontSize) / 2 + 0.6);
+          page.drawText(text, {
+            x: textX,
+            y: textY,
+            size: fontSize,
+            font: selectedFont,
+            color: PDFLib.rgb(0.04, 0.04, 0.04)
+          });
+        }
+      }
+
+      for (const image of layout.images || []) {
+        try {
+          const embedded = image.extension === "png"
+            ? await target.embedPng(image.data)
+            : await target.embedJpg(image.data);
+          const fromCol = image.from.col - range.s.c;
+          const toCol = image.to.col - range.s.c;
+          const fromRow = image.from.row - range.s.r;
+          const toRow = image.to.row - range.s.r;
+          if (fromCol < 0 || toCol < 0 || fromRow < 0 || toRow < 0 ||
+              fromCol >= colWidths.length || toCol >= colWidths.length ||
+              fromRow >= rowHeights.length || toRow >= rowHeights.length) continue;
+          const imageX = originX + xPos[fromCol] + colWidths[fromCol] * scale * image.from.colFrac;
+          const imageTop = topY - yPos[fromRow] - rowHeights[fromRow] * scale * image.from.rowFrac;
+          const imageRight = originX + xPos[toCol] + colWidths[toCol] * scale * image.to.colFrac;
+          const imageBottom = topY - yPos[toRow] - rowHeights[toRow] * scale * image.to.rowFrac;
+          const boxWidth = Math.max(1, imageRight - imageX);
+          const boxHeight = Math.max(1, imageTop - imageBottom);
+          const natural = embedded.scale(1);
+          const imageScale = Math.min(boxWidth / natural.width, boxHeight / natural.height);
+          const drawWidth = natural.width * imageScale;
+          const drawHeight = natural.height * imageScale;
+          page.drawImage(embedded, {
+            x: imageX + (boxWidth - drawWidth) / 2,
+            y: imageBottom + (boxHeight - drawHeight) / 2,
+            width: drawWidth,
+            height: drawHeight
+          });
+        } catch {
+          // Ignore unsupported legacy worksheet artwork and keep the document usable.
+        }
+      }
+    }
+
+    return pagesAdded > 0;
+  }
+
+
   async function addSpreadsheetPages(target, item) {
     const XLSX = await loadXlsxEngine();
     const bytes = await item.file.arrayBuffer();
-    const workbook = XLSX.read(bytes, { type: "array", cellDates: true });
+    const workbook = XLSX.read(bytes, {
+      type: "array",
+      cellDates: true,
+      cellStyles: true,
+      sheetStubs: true
+    });
+
+    if (item.kind === "xls") {
+      try {
+        const legacyLayouts = parseLegacyXlsLayout(new Uint8Array(bytes));
+        if (await addLegacyXlsSpreadsheetPages(target, workbook, XLSX, legacyLayouts)) return;
+      } catch {
+        // Fall back to the simple Excel renderer for unusual or damaged legacy files.
+      }
+    }
 
     const font = await target.embedFont(PDFLib.StandardFonts.Helvetica);
     const bold = await target.embedFont(PDFLib.StandardFonts.HelveticaBold);
